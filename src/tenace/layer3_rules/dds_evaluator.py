@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import random
 
 import numpy as np
@@ -63,6 +64,7 @@ def _dealt_hand(world: pyspiel.State, seat: Seat) -> list[int]:
 
 
 def _matches_constraint(cards: list[int], constraint: SeatConstraint) -> bool:
+    """Enforces hard HCP and suit-length bounds; likely_cards stays a soft Strategist hint."""
     hcp = hand_hcp(cards)
     if not (constraint.min_hcp <= hcp <= constraint.max_hcp):
         return False
@@ -113,6 +115,7 @@ class RuleDDSEvaluator:
         observer: Seat,
         strategy: StrategyState | None = None,
     ) -> list[pyspiel.State]:
+        """Samples infostate worlds enforcing hard HCP/suit-length bounds (likely_cards stays soft)."""
         observer = Seat(observer)
         if state.current_phase() == 0:
             raise ValueError("Cannot sample worlds during incomplete deal phase")
@@ -230,29 +233,49 @@ class RuleDDSEvaluator:
         if len(candidates) == 1:
             return candidates[0].action
 
-        probs = [c.make_prob for c in candidates if c.make_prob is not None]
+        probs = [
+            c.make_prob
+            for c in candidates
+            if c.make_prob is not None and math.isfinite(c.make_prob)
+        ]
         if probs:
             best_prob = max(probs)
             threshold = best_prob - self.max_make_prob_drop
             viable = [
                 c
                 for c in candidates
-                if c.make_prob is None or c.make_prob >= threshold - 1e-12
+                if c.make_prob is None
+                or not math.isfinite(c.make_prob)
+                or c.make_prob >= threshold - 1e-12
             ]
         else:
             viable = list(candidates)
 
-        if decision is None or not decision.option_scores:
-            return max(viable, key=lambda c: c.baseline_ev).action
+        def _safe_ev(cand: CandidateOption) -> float:
+            return float(cand.baseline_ev) if math.isfinite(cand.baseline_ev) else float("-inf")
 
-        evs = [c.baseline_ev for c in viable]
-        ev_min = min(evs)
-        ev_max = max(evs)
-        denom = max(ev_max - ev_min, 1.0)
+        if decision is None or not decision.option_scores:
+            return max(viable, key=_safe_ev).action
+
+        finite_evs = [float(c.baseline_ev) for c in viable if math.isfinite(c.baseline_ev)]
+        if finite_evs:
+            ev_min = min(finite_evs)
+            ev_max = max(finite_evs)
+            denom = max(ev_max - ev_min, 1.0)
+        else:
+            ev_min = 0.0
+            denom = 1.0
 
         def _blended_score(cand: CandidateOption) -> float:
-            norm_ev = (cand.baseline_ev - ev_min) / denom
-            llm_score = decision.option_scores.get(cand.label, 0.5)
+            norm_ev = (
+                (float(cand.baseline_ev) - ev_min) / denom
+                if math.isfinite(cand.baseline_ev)
+                else 0.0
+            )
+            raw = decision.option_scores.get(cand.label, 0.5)
+            llm_score = (
+                min(1.0, max(0.0, float(raw))) if math.isfinite(raw) else 0.5
+            )
             return 0.45 * norm_ev + 0.55 * llm_score
 
         return max(viable, key=_blended_score).action

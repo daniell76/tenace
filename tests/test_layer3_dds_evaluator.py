@@ -338,3 +338,49 @@ def test_select_guarded_action_edge_cases():
     c2 = CandidateOption(action=56, label="1D", baseline_ev=100.0, make_prob=None)
     decision = TacticalDecision(option_scores={"1C": 0.2, "1D": 0.9})
     assert evaluator.select_guarded_action([c1, c2], decision) == 56
+
+
+def test_select_guarded_action_sanitizes_nonfinite_and_out_of_range_scores():
+    evaluator = RuleDDSEvaluator(max_make_prob_drop=0.20)
+
+    low_ev_first = CandidateOption(
+        action=55, label="1C", baseline_ev=100.0, make_prob=0.85
+    )
+    high_ev_second = CandidateOption(
+        action=56, label="1D", baseline_ev=400.0, make_prob=0.85
+    )
+
+    # (a) NaN on viable[0] must NOT poison Python's max(); treated as neutral 0.5
+    # -> 1C gets 0.45*0.0 + 0.55*0.5 = 0.275; 1D gets 0.45*1.0 + 0.55*0.6 = 0.78
+    nan_decision = TacticalDecision(option_scores={"1C": float("nan"), "1D": 0.6})
+    assert evaluator.select_guarded_action([low_ev_first, high_ev_second], nan_decision) == 56
+
+    # Non-finite inf/-inf on option_scores also sanitized to neutral 0.5
+    inf_decision = TacticalDecision(option_scores={"1C": float("inf"), "1D": 0.6})
+    assert evaluator.select_guarded_action([low_ev_first, high_ev_second], inf_decision) == 56
+
+    # (b) Out-of-range scores (e.g., 100.0 / -5.0) are clamped to [0.0, 1.0]
+    # Clamped: 1C (ev=100 -> norm_ev=0.0, llm=1.0 -> 0.55) vs 1D (ev=400 -> norm_ev=1.0, llm=0.8 -> 0.45 + 0.44 = 0.89)
+    # Without clamping, 1C would get 55.0 and falsely beat 1D!
+    unclamped_decision = TacticalDecision(option_scores={"1C": 100.0, "1D": 0.8})
+    assert (
+        evaluator.select_guarded_action([low_ev_first, high_ev_second], unclamped_decision)
+        == 56
+    )
+
+    # Negative out-of-range (-5.0) clamped to 0.0 so norm_ev=1.0 (0.45) still beats norm_ev=0.0 + llm=0.5 (0.275)
+    neg_out_of_range = TacticalDecision(option_scores={"1C": 0.5, "1D": -5.0})
+    assert (
+        evaluator.select_guarded_action([low_ev_first, high_ev_second], neg_out_of_range)
+        == 56
+    )
+
+    # Non-finite baseline_ev on viable[0] does not poison max() either
+    nan_ev_first = low_ev_first.model_copy(update={"baseline_ev": float("nan")})
+    assert evaluator.select_guarded_action([nan_ev_first, high_ev_second], None) == 56
+    assert (
+        evaluator.select_guarded_action(
+            [nan_ev_first, high_ev_second], TacticalDecision(option_scores={"1C": 0.5, "1D": 0.6})
+        )
+        == 56
+    )
