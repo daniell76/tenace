@@ -1,8 +1,14 @@
 import pyspiel
+import pytest
+from pydantic import ValidationError
 
+import tenace.domain as domain
 from tenace.domain.types import (
     BIDDING_ACTION_BASE,
+    Assumption,
+    CandidateOption,
     Seat,
+    SeatConstraint,
     Suit,
     action_label,
     card_id,
@@ -51,3 +57,81 @@ def test_bidding_action_labels_and_hcp():
         card_id(Suit.CLUBS, 0),     # Two = 0
     ]
     assert hand_hcp(cards) == 10
+    assert hand_hcp(c for c in cards) == 10
+
+
+def test_card_and_action_error_paths():
+    with pytest.raises(ValueError):
+        card_id(Suit.CLUBS, -1)
+    with pytest.raises(ValueError):
+        card_id(Suit.CLUBS, 13)
+    with pytest.raises(ValueError):
+        card_id(99, 0)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError):
+        card_suit(-1)
+    with pytest.raises(ValueError):
+        card_suit(52)
+
+    with pytest.raises(ValueError):
+        card_rank(-1)
+    with pytest.raises(ValueError):
+        card_rank(52)
+
+    with pytest.raises(ValueError):
+        action_label(-1)
+    with pytest.raises(ValueError):
+        action_label(90)
+
+    ace_spades = card_id(Suit.SPADES, 12)
+    with pytest.raises(ValueError, match="Duplicate card in hand"):
+        hand_hcp([ace_spades, ace_spades])
+
+
+def test_pydantic_validation_constraints():
+    with pytest.raises(ValidationError):
+        Assumption(claim="x", confidence=1.5)
+
+    with pytest.raises(ValidationError):
+        SeatConstraint(seat=Seat.NORTH, min_hcp=15, max_hcp=10)
+
+    with pytest.raises(ValidationError):
+        SeatConstraint(seat=Seat.NORTH, min_suit_lengths={Suit.SPADES: 14})
+
+    with pytest.raises(ValidationError):
+        SeatConstraint(seat=Seat.NORTH, max_suit_lengths={Suit.SPADES: -1})
+
+    with pytest.raises(ValidationError):
+        SeatConstraint(
+            seat=Seat.NORTH,
+            min_suit_lengths={Suit.SPADES: 6},
+            max_suit_lengths={Suit.SPADES: 4},
+        )
+
+    with pytest.raises(ValidationError):
+        SeatConstraint(seat=Seat.NORTH, likely_cards=[52])
+
+    with pytest.raises(ValidationError):
+        SeatConstraint(seat=Seat.NORTH, likely_cards=[-1])
+
+    with pytest.raises(ValidationError):
+        CandidateOption(action=99, label="invalid")
+
+    with pytest.raises(ValidationError):
+        CandidateOption(action=-1, label="invalid")
+
+    with pytest.raises(ValidationError):
+        CandidateOption(action=52, label="Pass", equivalent_actions=[99])
+
+    with pytest.raises(ValidationError):
+        CandidateOption(action=52, label="Pass", make_prob=1.5)
+
+    with pytest.raises(ValidationError):
+        CandidateOption(action=52, label="Pass", make_prob=-0.1)
+
+
+def test_domain_package_reexports():
+    assert domain.Seat is Seat
+    assert domain.Suit is Suit
+    assert domain.StrategyState is not None
+    assert "StrategyState" in domain.__all__

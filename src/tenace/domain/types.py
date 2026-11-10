@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from enum import IntEnum
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 NUM_CARDS = 52
 NUM_SUITS = 4
@@ -20,6 +20,41 @@ RANK_CHARS = ("2", "3", "4", "5", "6", "7", "8", "9", "T", "J", "Q", "K", "A")
 SUIT_CHARS = ("C", "D", "H", "S")
 DENOMINATION_CHARS = ("C", "D", "H", "S", "NT")
 HCP_BY_RANK = {12: 4, 11: 3, 10: 2, 9: 1}
+
+CardId = Annotated[int, Field(ge=0, le=NUM_CARDS - 1)]
+ActionId = Annotated[int, Field(ge=0, le=MAX_ACTION)]
+SuitLength = Annotated[int, Field(ge=0, le=NUM_RANKS)]
+
+__all__ = [
+    "ActionId",
+    "Assumption",
+    "BIDDING_ACTION_BASE",
+    "CandidateOption",
+    "CardId",
+    "DBL_ACTION",
+    "DENOMINATION_CHARS",
+    "FIRST_CONTRACT_BID_ACTION",
+    "HCP_BY_RANK",
+    "MAX_ACTION",
+    "NUM_CARDS",
+    "NUM_RANKS",
+    "NUM_SUITS",
+    "PASS_ACTION",
+    "RANK_CHARS",
+    "RDBL_ACTION",
+    "SUIT_CHARS",
+    "Seat",
+    "SeatConstraint",
+    "StrategyState",
+    "Suit",
+    "SuitLength",
+    "TacticalDecision",
+    "action_label",
+    "card_id",
+    "card_rank",
+    "card_suit",
+    "hand_hcp",
+]
 
 
 class Seat(IntEnum):
@@ -45,6 +80,7 @@ class Suit(IntEnum):
 
 
 def card_id(suit: Suit, rank: int) -> int:
+    suit = Suit(suit)
     if not (0 <= rank < NUM_RANKS):
         raise ValueError(f"Invalid rank: {rank}")
     return rank * NUM_SUITS + int(suit)
@@ -80,16 +116,34 @@ def action_label(action: int) -> str:
 
 
 def hand_hcp(cards: Iterable[int]) -> int:
-    return sum(HCP_BY_RANK.get(card_rank(c), 0) for c in cards)
+    card_list = list(cards)
+    if len(set(card_list)) != len(card_list):
+        raise ValueError("Duplicate card in hand")
+    return sum(HCP_BY_RANK.get(card_rank(c), 0) for c in card_list)
 
 
 class SeatConstraint(BaseModel):
     seat: Seat
     min_hcp: int = Field(default=0, ge=0, le=37)
     max_hcp: int = Field(default=37, ge=0, le=37)
-    min_suit_lengths: dict[Suit, int] = Field(default_factory=dict)
-    max_suit_lengths: dict[Suit, int] = Field(default_factory=dict)
-    likely_cards: list[int] = Field(default_factory=list)
+    min_suit_lengths: dict[Suit, SuitLength] = Field(default_factory=dict)
+    max_suit_lengths: dict[Suit, SuitLength] = Field(default_factory=dict)
+    likely_cards: list[CardId] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_bounds(self) -> SeatConstraint:
+        if self.min_hcp > self.max_hcp:
+            raise ValueError(
+                f"min_hcp ({self.min_hcp}) must be <= max_hcp ({self.max_hcp})"
+            )
+        for suit, min_len in self.min_suit_lengths.items():
+            max_len = self.max_suit_lengths.get(suit)
+            if max_len is not None and min_len > max_len:
+                raise ValueError(
+                    f"min_suit_lengths[{suit.name}] ({min_len}) must be <= "
+                    f"max_suit_lengths[{suit.name}] ({max_len})"
+                )
+        return self
 
 
 class Assumption(BaseModel):
@@ -107,11 +161,11 @@ class StrategyState(BaseModel):
 
 
 class CandidateOption(BaseModel):
-    action: int
+    action: ActionId
     label: str
-    equivalent_actions: list[int] = Field(default_factory=list)
+    equivalent_actions: list[ActionId] = Field(default_factory=list)
     baseline_ev: float = 0.0
-    make_prob: float | None = None
+    make_prob: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class TacticalDecision(BaseModel):
