@@ -557,6 +557,168 @@ def test_bluechip_seat_bot_reset_for_board_recovers_if_unfinished_board_aborted(
             p.join(timeout=5.0)
 
 
+def test_bluechip_seat_bot_rejects_use_double_dummy_result_true():
+    peers: list[LoopbackBlueChipPeer] = []
+
+    def make_bluechip_bot(seat: Seat) -> BlueChipSeatBot:
+        def controller_factory() -> SocketBlueChipController:
+            ctrl = SocketBlueChipController(timeout_secs=5.0)
+            peer = LoopbackBlueChipPeer(port=ctrl.port, open_1nt_once=True)
+            peers.append(peer)
+            peer.start()
+            ctrl.accept()
+            return ctrl
+
+        return BlueChipSeatBot(seat=seat, controller_factory=controller_factory)
+
+    runner = DuplicateMatchRunner(tournament_seed=42, use_double_dummy_result=True)
+    with pytest.raises(ValueError, match="use_double_dummy_result=False"):
+        runner.play_match(
+            team_a_factory=make_bluechip_bot,
+            team_b_factory=FirstLegalPassBaselineBot,
+            num_boards=1,
+        )
+    for p in peers:
+        p.join(timeout=5.0)
+
+    # Also reject bare pyspiel.load_game("bridge") whose C++ default is use_double_dummy_result=True
+    default_game = pyspiel.load_game("bridge")
+    default_state = default_game.new_initial_state()
+    for c in range(52):
+        default_state.apply_action(c)
+    bot = BlueChipSeatBot(
+        seat=Seat.NORTH,
+        controller_factory=lambda: pytest.fail("should reject before connecting"),
+    )
+    with pytest.raises(ValueError, match="use_double_dummy_result=False"):
+        bot.step(default_state)
+
+    for _ in range(4):
+        default_state.apply_action(PASS_ACTION)
+    with pytest.raises(ValueError, match="use_double_dummy_result=False"):
+        bot.on_board_end(default_state)
+
+
+def test_bluechip_seat_bot_as_dummy_syncs_all_52_cards_and_plays_board_2():
+    """When partner opens 1NT and BlueChipSeatBot sits in dummy_seat, its step() is never
+    called during all 13 tricks; on_board_end() must sync all 52 cards without requesting
+    Dummy's cards, send Timing, and transition cleanly onto Board 2 on the same TCP session.
+    """
+    south_peers: list[LoopbackBlueChipPeer] = []
+
+    def make_south_bot() -> BlueChipSeatBot:
+        def controller_factory() -> SocketBlueChipController:
+            ctrl = SocketBlueChipController(timeout_secs=5.0)
+            peer = LoopbackBlueChipPeer(port=ctrl.port, open_1nt_once=False)
+            south_peers.append(peer)
+            peer.start()
+            ctrl.accept()
+            return ctrl
+
+        return BlueChipSeatBot(seat=Seat.SOUTH, controller_factory=controller_factory)
+
+    class NorthOpens1NTBot(FirstLegalPassBaselineBot):
+        def step(self, state: pyspiel.State) -> int:
+            if state.current_phase() == 1 and 59 in state.legal_actions():
+                return 59
+            return super().step(state)
+
+    runner = DuplicateMatchRunner(tournament_seed=42, use_double_dummy_result=False)
+    south_bot = make_south_bot()
+    seats = {
+        Seat.NORTH: NorthOpens1NTBot(Seat.NORTH),
+        Seat.SOUTH: south_bot,
+        Seat.EAST: FirstLegalPassBaselineBot(Seat.EAST),
+        Seat.WEST: FirstLegalPassBaselineBot(Seat.WEST),
+    }
+    try:
+        board1 = runner._new_dealt_board_state(1)
+        runner._play_room(board1, seats)
+        assert board1.is_terminal()
+
+        board2 = runner._new_dealt_board_state(2)
+        runner._play_room(board2, seats)
+        assert board2.is_terminal()
+    finally:
+        south_bot.close()
+        for p in south_peers:
+            p.join(timeout=5.0)
+
+    assert len(south_peers) == 1
+    peer = south_peers[0]
+    assert len(peer.deal_headers) == 2
+    assert not any("ready for dummy" in ev for ev in peer.event_log)
+    play_syncs = [ev for ev in peer.event_log if "RECV:" in ev and " plays " in ev]
+    assert len(play_syncs) == 104  # 52 cards on Board 1 + 52 cards on Board 2
+
+
+def test_bluechip_seat_bot_rejects_mismatched_reply_actor_seat():
+    class ScriptedTransport:
+        def __init__(self, lines: list[str]) -> None:
+            self._lines = list(lines)
+            self.sent: list[str] = []
+
+        def read_line(self) -> str:
+            return self._lines.pop(0)
+
+        def send_line(self, line: str) -> None:
+            self.sent.append(line)
+
+        def close(self) -> None:
+            return None
+
+    # Auction: bot is NORTH, engine illegally replies "SOUTH PASSES" on NORTH's turn
+    bad_auction_transport = ScriptedTransport(
+        [
+            'Connecting "MockEngine" as ANYPL using protocol version 18',
+            "NORTH ready for teams",
+            "NORTH ready to start",
+            "NORTH ready for deal",
+            "NORTH ready for cards",
+            "SOUTH PASSES",
+        ]
+    )
+    game = pyspiel.load_game("bridge(use_double_dummy_result=false)")
+    state = game.new_initial_state()
+    for c in range(52):
+        state.apply_action(c)
+
+    bot = BlueChipSeatBot(seat=Seat.NORTH, controller_factory=lambda: bad_auction_transport)
+    with pytest.raises(ValueError, match="expected actor NORTH.*got SOUTH"):
+        bot.step(state.clone())
+
+    # Play from Dummy: NORTH is declarer in 1NT, EAST leads Trick 1, now NORTH plays SOUTH (Dummy)
+    # Engine illegally replies "NORTH plays ..." instead of "SOUTH plays ..."!
+    state.apply_action(59)  # NORTH bids 1NT
+    state.apply_action(PASS_ACTION)
+    state.apply_action(PASS_ACTION)
+    state.apply_action(PASS_ACTION)
+    east_lead = state.legal_actions()[0]
+    state.apply_action(east_lead)  # EAST leads; current_player() is NORTH playing Dummy (SOUTH)
+
+    bad_dummy_play_transport = ScriptedTransport(
+        [
+            'Connecting "MockEngine" as ANYPL using protocol version 18',
+            "NORTH ready for teams",
+            "NORTH ready to start",
+            "NORTH ready for deal",
+            "NORTH ready for cards",
+            "NORTH ready for NORTH's bid",
+            "NORTH ready for EAST's bid",
+            "NORTH ready for SOUTH's bid",
+            "NORTH ready for WEST's bid",
+            "NORTH ready for EAST's card to trick 1",
+            "NORTH ready for dummy",
+            "NORTH plays 2c",
+        ]
+    )
+    decl_bot = BlueChipSeatBot(
+        seat=Seat.NORTH, controller_factory=lambda: bad_dummy_play_transport
+    )
+    with pytest.raises(ValueError, match="expected actor SOUTH.*got NORTH"):
+        decl_bot.step(state.clone())
+
+
 def test_bluechip_adapter_strict_imperfect_information_fair_play():
     import tenace.harness.bluechip as bluechip_mod
 

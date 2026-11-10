@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import contextlib
 import io
 import re
 import shlex
@@ -144,7 +145,7 @@ def openspiel_action_to_bluechip(action: int) -> str:
     return f"plays {_LOWER_RANKS[r_idx]}{_LOWER_SUITS[s_idx]}"
 
 
-def parse_bluechip_player_action(line: str) -> int:
+def _parse_bluechip_player_action_with_seat(line: str) -> tuple[Seat, int]:
     if not isinstance(line, str):
         raise ValueError(f"Expected string action line, got {line!r}")
 
@@ -152,23 +153,29 @@ def parse_bluechip_player_action(line: str) -> int:
     if match is None:
         raise ValueError(f"Malformed BlueChip player action line: {line!r}")
 
+    actor_seat = Seat[match.group("seat").upper()]
     if match.group("pass"):
-        return PASS_ACTION
+        return actor_seat, PASS_ACTION
     if match.group("dbl"):
-        return DBL_ACTION
+        return actor_seat, DBL_ACTION
     if match.group("rdbl"):
-        return RDBL_ACTION
+        return actor_seat, RDBL_ACTION
     if match.group("level"):
         level = int(match.group("level"))
         denom = match.group("denom").upper()
         denom_idx = DENOMINATION_CHARS.index(denom)
-        return FIRST_CONTRACT_BID_ACTION + (level - 1) * 5 + denom_idx
+        return actor_seat, FIRST_CONTRACT_BID_ACTION + (level - 1) * 5 + denom_idx
 
     rank_ch = match.group("rank").lower()
     suit_ch = match.group("suit").lower()
     r_idx = _LOWER_RANKS.index(rank_ch)
     s_idx = _LOWER_SUITS.index(suit_ch)
-    return card_id(Suit(s_idx), r_idx)
+    return actor_seat, card_id(Suit(s_idx), r_idx)
+
+
+def parse_bluechip_player_action(line: str) -> int:
+    _actor_seat, action = _parse_bluechip_player_action_with_seat(line)
+    return action
 
 
 @runtime_checkable
@@ -296,7 +303,8 @@ class SubprocessTcpBlueChipController:
                     proc.wait(timeout=3.0)
                 except subprocess.TimeoutExpired:
                     proc.kill()
-                    proc.wait(timeout=3.0)
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        proc.wait(timeout=3.0)
 
 
 def _cards_from_obs_slice(values: list[float]) -> list[int]:
@@ -350,6 +358,22 @@ def _parse_public_board_structure(
         dummy_seat = declarer.partner
 
     return auction_calls, play_actions, declarer, dummy_seat, trump_denom
+
+
+def _validate_full_card_play_game(state: pyspiel.State) -> None:
+    game = state.get_game()
+    params = game.get_parameters()
+    if "use_double_dummy_result" in params:
+        use_dd = bool(params["use_double_dummy_result"])
+    else:
+        use_dd = bool(
+            game.get_type().parameter_specification.get("use_double_dummy_result", False)
+        )
+    if use_dd:
+        raise ValueError(
+            "BlueChipSeatBot requires full card play (use_double_dummy_result=False); "
+            "BlueChip protocol v18 does not support double-dummy play skipping"
+        )
 
 
 def _compute_play_actors_and_next_leader(
@@ -564,8 +588,11 @@ class BlueChipSeatBot:
                 maybe_send_dummy_after_opening_lead()
 
         if state.is_terminal() and not self._board_finished:
-            ctrl.send_line(_TIMING_LINE)
-            self._board_finished = True
+            if declarer is None or len(play_actions) == NUM_CARDS:
+                ctrl.send_line(_TIMING_LINE)
+                self._board_finished = True
+            else:
+                self.close()
 
         return declarer, dummy_seat, len(play_actions), next_leader
 
@@ -581,6 +608,7 @@ class BlueChipSeatBot:
     def on_board_end(self, state: pyspiel.State) -> None:
         if not state.is_terminal():
             raise ValueError("on_board_end requires a terminal bridge state")
+        _validate_full_card_play_game(state)
         if self._board_started and not self._board_finished:
             self._sync_state(state)
 
@@ -589,6 +617,7 @@ class BlueChipSeatBot:
             raise ValueError("Cannot step on a terminal bridge state")
         if state.is_chance_node() or state.current_phase() == 0:
             raise ValueError("Cannot step during incomplete deal phase (chance node)")
+        _validate_full_card_play_game(state)
         if state.current_player() != int(self.seat):
             raise ValueError(
                 f"BlueChipSeatBot seat {self.seat.name} ({int(self.seat)}) called on "
@@ -598,6 +627,12 @@ class BlueChipSeatBot:
         _declarer, dummy_seat, cards_played, next_leader = self._sync_state(state)
         assert self._controller is not None
 
+        if state.current_phase() == 2:
+            assert next_leader is not None
+            expected_actor = Seat((int(next_leader) + (cards_played % 4)) % 4)
+        else:
+            expected_actor = self.seat
+
         if state.current_phase() == 2 and cards_played % 4 == 0:
             if dummy_seat is not None and next_leader == dummy_seat:
                 self._controller.send_line("Dummy to lead")
@@ -605,7 +640,12 @@ class BlueChipSeatBot:
                 self._controller.send_line(f"{self.seat.name} to lead")
 
         reply = self._controller.read_line()
-        chosen_action = parse_bluechip_player_action(reply)
+        reply_seat, chosen_action = _parse_bluechip_player_action_with_seat(reply)
+        if reply_seat != expected_actor:
+            raise ValueError(
+                f"BlueChip reply seat mismatch on {self.seat.name}: "
+                f"expected actor {expected_actor.name}, got {reply_seat.name} ({reply!r})"
+            )
         self._synced_public_actions.append(chosen_action)
         return chosen_action
 
