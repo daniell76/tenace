@@ -1,0 +1,190 @@
+from __future__ import annotations
+
+from collections import defaultdict
+
+from tenace.domain.types import (
+    DBL_ACTION,
+    DENOMINATION_CHARS,
+    FIRST_CONTRACT_BID_ACTION,
+    NUM_CARDS,
+    RANK_CHARS,
+    RDBL_ACTION,
+    SUIT_CHARS,
+    Seat,
+    StrategyState,
+    Suit,
+    action_label,
+    card_rank,
+    card_suit,
+)
+from tenace.layer1_strategist.conventions import SAYC_CONVENTION_CARD, ConventionCard
+from tenace.layer3_rules.tracker import BoardFactSnapshot
+from tenace.models.clients import StructuredModelClient
+
+__all__ = [
+    "StrategistEngine",
+    "format_cards_by_suit",
+]
+
+_SUIT_DISPLAY_ORDER = (Suit.SPADES, Suit.HEARTS, Suit.DIAMONDS, Suit.CLUBS)
+
+
+def format_cards_by_suit(cards: list[int]) -> str:
+    if not cards:
+        return "(none)"
+    if any(isinstance(c, bool) or c < 0 or c >= NUM_CARDS for c in cards):
+        raise ValueError("All cards must be valid card IDs in [0, 51]")
+
+    by_suit: dict[Suit, list[int]] = defaultdict(list)
+    for card in set(cards):
+        by_suit[card_suit(card)].append(card)
+
+    parts: list[str] = []
+    for suit in _SUIT_DISPLAY_ORDER:
+        suit_char = SUIT_CHARS[int(suit)]
+        suit_cards = sorted(by_suit.get(suit, []), key=card_rank, reverse=True)
+        if suit_cards:
+            ranks_str = " ".join(RANK_CHARS[card_rank(c)] for c in suit_cards)
+            parts.append(f"{suit_char}: {ranks_str}")
+        else:
+            parts.append(f"{suit_char}: none")
+    return " | ".join(parts)
+
+
+def format_contract_summary(facts: BoardFactSnapshot) -> str:
+    if facts.contract_level <= 0 or facts.trump_denom is None or facts.declarer is None:
+        return "(none)"
+    denom = DENOMINATION_CHARS[facts.trump_denom]
+    doubled_suffix = ""
+    for _, call in reversed(facts.auction_calls):
+        if call == RDBL_ACTION:
+            doubled_suffix = "XX"
+            break
+        if call == DBL_ACTION:
+            doubled_suffix = "X"
+            break
+        if call >= FIRST_CONTRACT_BID_ACTION:
+            break
+    return f"{facts.contract_level}{denom}{doubled_suffix} by {facts.declarer.name}"
+
+
+def format_auction_sequence(auction_calls: list[tuple[Seat, int]]) -> str:
+    if not auction_calls:
+        return "(no calls yet)"
+    return " -> ".join(f"{seat.name}:{action_label(action)}" for seat, action in auction_calls)
+
+
+def format_known_voids(known_voids: dict[Seat, set[Suit]]) -> str:
+    entries: list[str] = []
+    for seat in Seat:
+        voids = sorted(known_voids.get(seat, set()), key=lambda s: int(s), reverse=True)
+        if voids:
+            suit_names = ", ".join(s.name for s in voids)
+            entries.append(f"{seat.name}: [{suit_names}]")
+    return "; ".join(entries) if entries else "(none)"
+
+
+class StrategistEngine:
+    def __init__(
+        self,
+        client: StructuredModelClient,
+        convention_card: ConventionCard = SAYC_CONVENTION_CARD,
+    ) -> None:
+        self.client = client
+        self.convention_card = convention_card
+
+    def should_replan(
+        self,
+        facts: BoardFactSnapshot,
+        current_strategy: StrategyState | None,
+        dummy_already_seen: bool,
+    ) -> bool:
+        if facts.phase == "terminal":
+            raise ValueError("Cannot plan on terminal board")
+        if current_strategy is None:
+            return True
+        if current_strategy.phase != facts.phase:
+            return True
+        if (
+            facts.phase == "play"
+            and facts.dummy_seat is not None
+            and not dummy_already_seen
+        ):
+            return True
+        if bool(facts.surprise_events):
+            return True
+        return False
+
+    def update_strategy(
+        self,
+        facts: BoardFactSnapshot,
+        current_strategy: StrategyState | None,
+        trigger_reason: str = "",
+    ) -> StrategyState:
+        if facts.phase == "terminal":
+            raise ValueError("Cannot plan on terminal board")
+
+        system_prompt = (
+            "You are Tenace Layer 1 Strategist, an expert Contract Bridge planner.\n"
+            f"Partnership System: {self.convention_card.name}\n"
+            f"Convention Summary: {self.convention_card.summary_rules}\n\n"
+            "Synthesize a coherent multi-trick or multi-round StrategyState based ONLY on "
+            "legal public information and your own visible cards.\n"
+            "Constraint syntax rules for `seat_constraints`:\n"
+            "- Outer keys and inner `seat` values must use seat names: "
+            '"NORTH", "EAST", "SOUTH", or "WEST".\n'
+            "- Suit keys in `min_suit_lengths` and `max_suit_lengths` must use suit names: "
+            '"CLUBS", "DIAMONDS", "HEARTS", or "SPADES".\n'
+            "- Ensure `min_hcp <= max_hcp` (0..37) and `min_suit_lengths[s] <= max_suit_lengths[s]` (0..13)."
+        )
+
+        dummy_line = (
+            f"{facts.dummy_seat.name} — {format_cards_by_suit(facts.dummy_cards)}"
+            if facts.dummy_seat is not None
+            else "(not yet revealed)"
+        )
+        played_line = (
+            " ".join(action_label(c) for c in facts.played_cards)
+            if facts.played_cards
+            else "(none)"
+        )
+        surprise_line = (
+            "; ".join(facts.surprise_events) if facts.surprise_events else "(none)"
+        )
+        reason_line = trigger_reason.strip() if trigger_reason.strip() else "(unspecified)"
+        prev_strategy_json = (
+            current_strategy.model_dump_json() if current_strategy is not None else "(none)"
+        )
+
+        lines = [
+            f"Seat: {facts.observer.name} (Partner: {facts.observer.partner.name})",
+            f"Phase: {facts.phase}",
+            f"Own Hand ({facts.own_hcp} HCP): {format_cards_by_suit(facts.own_cards)}",
+            f"Dummy: {dummy_line}",
+        ]
+        if facts.phase == "play":
+            lines.append(f"Contract: {format_contract_summary(facts)}")
+        lines.extend(
+            [
+                f"Auction Sequence: {format_auction_sequence(facts.auction_calls)}",
+                f"Played Cards: {played_line}",
+                f"Known Voids: {format_known_voids(facts.known_voids)}",
+                f"Replan Trigger: {reason_line}",
+                f"Surprise Events: {surprise_line}",
+                f"Previous StrategyState JSON: {prev_strategy_json}",
+            ]
+        )
+        user_prompt = "\n".join(lines)
+
+        raw_strategy = self.client.generate_structured(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            schema=StrategyState,
+        )
+        next_revision = 1 if current_strategy is None else current_strategy.revision + 1
+        return raw_strategy.model_copy(
+            update={
+                "phase": facts.phase,
+                "revision": next_revision,
+            }
+        )
