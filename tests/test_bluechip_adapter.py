@@ -496,6 +496,7 @@ def test_subprocess_tcp_bluechip_controller_spawns_and_cleans_up_process():
 
     child_code = (
         "import socket, sys, time\n"
+        "suits = {'C': 0, 'D': 1}\n"
         "s = socket.create_connection(('127.0.0.1', int(sys.argv[1])), timeout=5.0)\n"
         's.sendall(b\'Connecting "SubprocBot" as ANYPL using protocol version 18\\r\\n\')\n'
         "line = s.makefile('r', encoding='ascii', newline='\\r\\n').readline().strip()\n"

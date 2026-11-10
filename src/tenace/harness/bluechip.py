@@ -264,7 +264,7 @@ class SubprocessTcpBlueChipController:
                 "cmd_template must contain '{port}' placeholder for TCP callback port"
             )
         self._socket_ctrl = SocketBlueChipController(timeout_secs=timeout_secs)
-        cmd_str = cmd_template.format(port=self._socket_ctrl.port)
+        cmd_str = cmd_template.replace("{port}", str(self._socket_ctrl.port))
         argv = shlex.split(cmd_str)
         if not argv:
             self._socket_ctrl.close()

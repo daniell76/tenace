@@ -952,3 +952,23 @@ def test_duplicate_runner_closes_all_bots_in_finally_when_bot_raises_mid_board()
     assert len(close_calls_with_failing_close) == 8
 
 
+def test_duplicate_runner_board2_non_north_dealer_supports_infostate_resampling():
+    import random
+
+    runner = DuplicateMatchRunner(tournament_seed=42, use_double_dummy_result=False)
+    state = runner._new_dealt_board_state(board_number=2)
+    assert state.current_player() == int(Seat.EAST)
+    state.apply_action(PASS_ACTION)  # East Pass
+    state.apply_action(89)           # South 7NT
+    state.apply_action(PASS_ACTION)  # West Pass
+    state.apply_action(PASS_ACTION)  # North Pass
+    state.apply_action(PASS_ACTION)  # East Pass
+    for _ in range(3):
+        state.apply_action(state.legal_actions()[0])
+    assert state.current_player() == int(Seat.SOUTH)
+    rng = random.Random(123)
+    resampled = state.resample_from_infostate(int(Seat.SOUTH), rng.random)
+    assert resampled.current_player() == int(Seat.SOUTH)
+
+
+

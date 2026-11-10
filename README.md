@@ -47,9 +47,56 @@ uv run pytest -v
 
 All unit and integration tests run 100% offline using deterministic OpenSpiel deals and structured mock model clients.
 
-## Live Vertex AI Gemini + DiffusionGemma Quickstart
+## `tenace-match` CLI Runner
 
-Authenticate with Google Cloud Application Default Credentials (`gcloud auth application-default login`) and run a two-room WBF Duplicate IMP match against the deterministic pass/first-legal baseline:
+Tenace ships with the `tenace-match` CLI entrypoint to run two-room WBF Duplicate IMP matches and print a formatted board-by-board scorecard with Open/Closed Room contracts, auctions, trick logs, Layer-1 Strategist revision traces, and API telemetry.
+
+### 1. Offline 3-Layer Smoke Match (`--mode mock`)
+
+Run the full 3-layer neuro-symbolic pipeline locally without network credentials using `HeuristicMockModelClient` + C++ constrained double-dummy rollouts:
+
+```bash
+uv run tenace-match --mode mock --boards 2 --dds-worlds 8
+```
+
+### 2. Live Vertex AI Match (Gemini 2.5 Pro + DiffusionGemma)
+
+Authenticate with Google Cloud Application Default Credentials (`gcloud auth application-default login`) and run against live Vertex AI models:
+
+```bash
+# Default: Layer-1 Gemini 2.5 Pro (global) + Layer-2 DiffusionGemma (us-central1)
+uv run tenace-match --project your-gcp-project-id --boards 4
+
+# Optional dedicated Vertex AI Endpoint ID for DiffusionGemma:
+uv run tenace-match --project your-gcp-project-id --evaluator-endpoint-id 1234567890 --boards 4
+
+# Gemini-only Layer-2 Evaluator fallback (defaults to gemini-2.5-flash when --evaluator-model is omitted):
+uv run tenace-match --project your-gcp-project-id --evaluator-backend gemini --evaluator-location global --boards 4
+```
+
+### 3. Playing Championship Engines (WBridge5 & BEN) via BlueChip Protocol v18
+
+Tenace includes a WBF-compliant BlueChip Bridge Protocol v18 Table Manager TCP adapter (`BlueChipSeatBot` + `SubprocessTcpBlueChipController`) so Tenace can play automated duplicate matches directly against external championship engines such as **WBridge5** (via Wine) or **BEN** (Bridge Engine Neural). Pass `{port}` in `--bluechip-cmd` for the per-seat loopback callback port:
+
+```bash
+# Against WBridge5 via Wine:
+uv run tenace-match \
+  --project your-gcp-project-id \
+  --opponent bluechip \
+  --bluechip-cmd 'wine /path/to/Wbridge5.exe Autoconnect {port}' \
+  --boards 4
+
+# Against BEN (Bridge Engine Neural) table manager client:
+uv run tenace-match \
+  --project your-gcp-project-id \
+  --opponent bluechip \
+  --bluechip-cmd 'python /path/to/ben/src/table_manager_client.py --host 127.0.0.1 --port {port}' \
+  --boards 4
+```
+
+## Python API Quickstart
+
+You can also wire `TenaceAgent` and `DuplicateMatchRunner` directly in Python:
 
 ```python
 from tenace import (

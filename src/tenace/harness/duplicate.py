@@ -226,26 +226,26 @@ class DuplicateMatchRunner:
                 actions, probs = zip(*outcomes, strict=True)
                 state.apply_action(deal_rng.choices(actions, weights=probs, k=1)[0])
 
-        if not self.use_double_dummy_result:
-            return state
-
         # Note: OpenSpiel's BridgeGame.new_initial_state(tournament_seed, board_number)
-        # constructs an internal subgame with default use_double_dummy_result=false unless
-        # replayed on an explicit parameterized bridge game.
+        # binds state.get_game() to a default dealer=0 parent game, which causes C++
+        # state.resample_from_infostate() to desync during card play on non-North dealer
+        # boards (and ignores use_double_dummy_result=True). Replaying the 52 dealt cards
+        # onto an explicit parameterized bridge game preserves exact WBF dealer/vul/deal
+        # while keeping state.resample_from_infostate() consistent across all 16 boards.
         dealer, dealer_vul, non_dealer_vul = _wbf_board_params(board_number)
-        dd_game = pyspiel.load_game(
+        board_game = pyspiel.load_game(
             "bridge",
             {
                 "dealer": dealer,
                 "dealer_vul": dealer_vul,
                 "non_dealer_vul": non_dealer_vul,
-                "use_double_dummy_result": True,
+                "use_double_dummy_result": self.use_double_dummy_result,
             },
         )
-        dd_state = dd_game.new_initial_state()
+        board_state = board_game.new_initial_state()
         for entry in state.full_history()[:52]:
-            dd_state.apply_action(entry.action)
-        return dd_state
+            board_state.apply_action(entry.action)
+        return board_state
 
     def _play_room(
         self,
