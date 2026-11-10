@@ -23,7 +23,10 @@ from tenace.models.clients import StructuredModelClient
 
 __all__ = [
     "StrategistEngine",
+    "format_auction_sequence",
     "format_cards_by_suit",
+    "format_contract_summary",
+    "format_known_voids",
 ]
 
 _SUIT_DISPLAY_ORDER = (Suit.SPADES, Suit.HEARTS, Suit.DIAMONDS, Suit.CLUBS)

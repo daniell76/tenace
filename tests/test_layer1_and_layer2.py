@@ -8,8 +8,10 @@ from pydantic import BaseModel, ValidationError
 import tenace.layer1_strategist as layer1_pkg
 import tenace.layer2_evaluator as layer2_pkg
 from tenace.domain.types import (
+    DBL_ACTION,
     FIRST_CONTRACT_BID_ACTION,
     PASS_ACTION,
+    RDBL_ACTION,
     Assumption,
     CandidateOption,
     Seat,
@@ -24,7 +26,10 @@ from tenace.layer1_strategist import (
     SAYC_CONVENTION_CARD,
     ConventionCard,
     StrategistEngine,
+    format_auction_sequence,
     format_cards_by_suit,
+    format_contract_summary,
+    format_known_voids,
 )
 from tenace.layer1_strategist.conventions import __all__ as conventions_all
 from tenace.layer1_strategist.strategist import __all__ as strategist_all
@@ -109,15 +114,75 @@ def _make_facts(
 
 def test_public_exports_for_layer1_and_layer2():
     assert {"ConventionCard", "SAYC_CONVENTION_CARD"}.issubset(set(conventions_all))
-    assert {"StrategistEngine", "format_cards_by_suit"}.issubset(set(strategist_all))
-    assert {
-        "ConventionCard",
-        "SAYC_CONVENTION_CARD",
+    expected_strategist_exports = {
         "StrategistEngine",
+        "format_auction_sequence",
         "format_cards_by_suit",
-    }.issubset(set(layer1_pkg.__all__))
+        "format_contract_summary",
+        "format_known_voids",
+    }
+    assert expected_strategist_exports.issubset(set(strategist_all))
+    assert ({"ConventionCard", "SAYC_CONVENTION_CARD"} | expected_strategist_exports).issubset(
+        set(layer1_pkg.__all__)
+    )
     assert {"DiffusionOptionEvaluator"}.issubset(set(evaluator_all))
     assert {"DiffusionOptionEvaluator"}.issubset(set(layer2_pkg.__all__))
+
+
+def test_format_contract_summary_doubled_and_redoubled():
+    assert format_contract_summary(_make_facts(phase="auction")) == "(none)"
+
+    # Earlier double overruled by a higher contract bid -> undoubled
+    undoubled = _make_facts(
+        phase="play",
+        declarer=Seat.SOUTH,
+        trump_denom=2,  # Hearts
+        contract_level=4,
+        auction_calls=[
+            (Seat.SOUTH, FIRST_CONTRACT_BID_ACTION + 12),  # 3H
+            (Seat.WEST, DBL_ACTION),
+            (Seat.NORTH, FIRST_CONTRACT_BID_ACTION + 17),  # 4H
+            (Seat.EAST, PASS_ACTION),
+            (Seat.SOUTH, PASS_ACTION),
+            (Seat.WEST, PASS_ACTION),
+        ],
+    )
+    assert format_contract_summary(undoubled) == "4H by SOUTH"
+
+    doubled = _make_facts(
+        phase="play",
+        declarer=Seat.NORTH,
+        trump_denom=3,  # Spades
+        contract_level=4,
+        auction_calls=[
+            (Seat.NORTH, FIRST_CONTRACT_BID_ACTION + 18),  # 4S
+            (Seat.EAST, DBL_ACTION),
+            (Seat.SOUTH, PASS_ACTION),
+            (Seat.WEST, PASS_ACTION),
+            (Seat.NORTH, PASS_ACTION),
+        ],
+    )
+    assert format_contract_summary(doubled) == "4SX by NORTH"
+
+    redoubled = _make_facts(
+        phase="play",
+        declarer=Seat.EAST,
+        trump_denom=4,  # NT
+        contract_level=3,
+        auction_calls=[
+            (Seat.EAST, FIRST_CONTRACT_BID_ACTION + 14),  # 3NT
+            (Seat.SOUTH, DBL_ACTION),
+            (Seat.WEST, RDBL_ACTION),
+            (Seat.NORTH, PASS_ACTION),
+            (Seat.EAST, PASS_ACTION),
+            (Seat.SOUTH, PASS_ACTION),
+        ],
+    )
+    assert format_contract_summary(redoubled) == "3NTXX by EAST"
+
+    # Verify the other shared formatters also behave deterministically
+    assert format_auction_sequence([]) == "(no calls yet)"
+    assert format_known_voids({s: set() for s in Seat}) == "(none)"
 
 
 def test_convention_card_immutability_and_zero_partner_state_leakage():
@@ -428,6 +493,9 @@ def test_layer2_evaluator_formats_candidates_and_returns_tactical_decision():
     assert call["schema"] is TacticalDecision
     user_prompt = call["user_prompt"]
 
+    # Verify Acting Hand line when declarer plays from own hand
+    assert "Acting Hand: Own (SOUTH)" in user_prompt
+
     # Verify strategy summary details
     assert "3" in user_prompt
     assert "Draw two rounds of trumps ending in dummy" in user_prompt
@@ -446,6 +514,71 @@ def test_layer2_evaluator_formats_candidates_and_returns_tactical_decision():
     assert "C:7" in user_prompt
     assert "baseline_ev=-100.0" in user_prompt
     assert "N/A" in user_prompt
+
+
+def test_layer2_evaluator_marks_acting_hand_dummy_when_declarer_plays_dummy_cards():
+    sq = card_id(Suit.SPADES, 10)   # S:Q in dummy (NORTH)
+    ha = card_id(Suit.HEARTS, 12)   # H:A in dummy (NORTH)
+    expected = TacticalDecision(
+        assumption_violated=False,
+        option_scores={"S:Q": 0.85, "H:A": 0.55},
+        rationale="Play S:Q from dummy to finesse.",
+    )
+    client = RecordingStructuredClient([expected, expected])
+    evaluator = DiffusionOptionEvaluator(client)
+
+    play_facts = _make_facts(
+        observer=Seat.SOUTH,
+        phase="play",
+        dummy_seat=Seat.NORTH,
+        dummy_cards=[sq, ha],
+        played_cards=[card_id(Suit.DIAMONDS, 11)],
+        declarer=Seat.SOUTH,
+        trump_denom=3,
+        contract_level=4,
+    )
+    strategy = StrategyState(
+        phase="play",
+        plan_summary="Lead trump from dummy",
+        revision=2,
+    )
+    dummy_candidates = [
+        CandidateOption(
+            action=sq,
+            label=action_label(sq),
+            equivalent_actions=[sq],
+            baseline_ev=420.0,
+            make_prob=0.80,
+        ),
+        CandidateOption(
+            action=ha,
+            label=action_label(ha),
+            equivalent_actions=[ha],
+            baseline_ev=100.0,
+            make_prob=0.60,
+        ),
+    ]
+
+    evaluator.evaluate(play_facts, strategy, dummy_candidates)
+    play_prompt = client.calls[0]["user_prompt"]
+    assert "Acting Hand: Dummy (NORTH)" in play_prompt
+    assert "Acting Hand: Own" not in play_prompt
+
+    # Auction phase should not emit a card-play Acting Hand line
+    auction_facts = _make_facts(observer=Seat.SOUTH, phase="auction")
+    auction_strategy = StrategyState(phase="auction", plan_summary="Bid 1S", revision=1)
+    bid_candidates = [
+        CandidateOption(
+            action=PASS_ACTION,
+            label="Pass",
+            equivalent_actions=[PASS_ACTION],
+            baseline_ev=0.0,
+            make_prob=0.5,
+        )
+    ]
+    evaluator.evaluate(auction_facts, auction_strategy, bid_candidates)
+    auction_prompt = client.calls[1]["user_prompt"]
+    assert "Acting Hand:" not in auction_prompt
 
 
 def test_layer2_evaluator_rejects_empty_candidates_and_terminal_phase():

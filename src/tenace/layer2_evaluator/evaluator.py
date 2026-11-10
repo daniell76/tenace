@@ -6,7 +6,7 @@ from tenace.domain.types import (
     TacticalDecision,
     action_label,
 )
-from tenace.layer1_strategist.strategist import (
+from tenace.layer1_strategist import (
     format_auction_sequence,
     format_cards_by_suit,
     format_contract_summary,
@@ -70,22 +70,39 @@ class DiffusionOptionEvaluator:
         user_lines = [
             "=== Board Facts ===",
             f"Observer: {facts.observer.name} | Phase: {facts.phase}",
-            f"Contract: {format_contract_summary(facts)}",
-            f"Own Hand ({facts.own_hcp} HCP): {format_cards_by_suit(facts.own_cards)}",
-            f"Dummy: {dummy_summary}",
-            f"Auction: {format_auction_sequence(facts.auction_calls)}",
-            f"Played Cards: {played_summary}",
-            f"Known Voids: {format_known_voids(facts.known_voids)}",
-            "",
-            "=== Active Strategy ===",
-            f"Revision: {strategy.revision}",
-            f"Plan Summary: {strategy.plan_summary}",
-            f"Target/Threat: {strategy.target_or_threat or '(none)'}",
-            f"Assumptions: {assumptions_summary}",
-            "",
-            "=== Candidate Options ===",
-            *candidate_lines,
         ]
+        if facts.phase == "play":
+            is_dummy_turn = (
+                facts.dummy_seat is not None
+                and facts.observer != facts.dummy_seat
+                and candidates[0].action in set(facts.dummy_cards)
+            )
+            acting_hand_line = (
+                f"Acting Hand: Dummy ({facts.dummy_seat.name})"
+                if is_dummy_turn and facts.dummy_seat is not None
+                else f"Acting Hand: Own ({facts.observer.name})"
+            )
+            user_lines.append(acting_hand_line)
+
+        user_lines.extend(
+            [
+                f"Contract: {format_contract_summary(facts)}",
+                f"Own Hand ({facts.own_hcp} HCP): {format_cards_by_suit(facts.own_cards)}",
+                f"Dummy: {dummy_summary}",
+                f"Auction: {format_auction_sequence(facts.auction_calls)}",
+                f"Played Cards: {played_summary}",
+                f"Known Voids: {format_known_voids(facts.known_voids)}",
+                "",
+                "=== Active Strategy ===",
+                f"Revision: {strategy.revision}",
+                f"Plan Summary: {strategy.plan_summary}",
+                f"Target/Threat: {strategy.target_or_threat or '(none)'}",
+                f"Assumptions: {assumptions_summary}",
+                "",
+                "=== Candidate Options ===",
+                *candidate_lines,
+            ]
+        )
         user_prompt = "\n".join(user_lines)
 
         return self.client.generate_structured(

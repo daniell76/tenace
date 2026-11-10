@@ -4,12 +4,18 @@ from tenace.layer1_strategist.conventions import (
 )
 from tenace.layer1_strategist.strategist import (
     StrategistEngine,
+    format_auction_sequence,
     format_cards_by_suit,
+    format_contract_summary,
+    format_known_voids,
 )
 
 __all__ = [
     "ConventionCard",
     "SAYC_CONVENTION_CARD",
     "StrategistEngine",
+    "format_auction_sequence",
     "format_cards_by_suit",
+    "format_contract_summary",
+    "format_known_voids",
 ]
