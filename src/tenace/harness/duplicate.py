@@ -21,7 +21,7 @@ from tenace.domain.types import (
 )
 from tenace.harness.scoring import score_diff_to_imps
 from tenace.layer1_strategist import format_auction_sequence
-from tenace.layer3_rules.tracker import _trick_winner
+from tenace.layer3_rules import trick_winner
 
 __all__ = [
     "BoardResult",
@@ -161,7 +161,7 @@ def _build_room_transcript(
                 f"{seat_p.name[0]}:{action_label(card)}" for seat_p, card in trick_plays
             )
             if len(trick_plays) == 4:
-                winner = _trick_winner(trick_plays, trump_denom)
+                winner = trick_winner(trick_plays, trump_denom)
                 tricks.append(f"Trick {trick_idx}: {cards_fmt} -> {winner.name}")
                 leader = winner
             else:

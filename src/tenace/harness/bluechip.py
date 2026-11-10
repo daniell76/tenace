@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import contextlib
 import io
+import math
 import re
 import shlex
 import socket
@@ -28,7 +29,7 @@ from tenace.domain.types import (
     card_rank,
     card_suit,
 )
-from tenace.layer3_rules.tracker import _trick_winner
+from tenace.layer3_rules import trick_winner
 
 __all__ = [
     "BlueChipLineTransport",
@@ -191,8 +192,13 @@ class SocketBlueChipController:
     """TCP Table Manager listener for a single BlueChip v18 external bridge client."""
 
     def __init__(self, timeout_secs: float = 60.0) -> None:
-        if timeout_secs <= 0:
-            raise ValueError("timeout_secs must be positive")
+        if (
+            isinstance(timeout_secs, bool)
+            or not isinstance(timeout_secs, (int, float))
+            or not math.isfinite(timeout_secs)
+            or timeout_secs <= 0
+        ):
+            raise ValueError("timeout_secs must be a finite positive number")
         self._timeout_secs = float(timeout_secs)
         self._listener: socket.socket | None = socket.socket(
             socket.AF_INET, socket.SOCK_STREAM
@@ -392,7 +398,7 @@ def _compute_play_actors_and_next_leader(
             card_hand_seats.append(hand_seat)
             trick_plays.append((hand_seat, card))
         if len(trick_plays) == 4:
-            leader = _trick_winner(trick_plays, trump_denom)
+            leader = trick_winner(trick_plays, trump_denom)
     return card_hand_seats, leader
 
 

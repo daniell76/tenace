@@ -491,6 +491,10 @@ def test_bluechip_seat_bot_dummy_lead_and_opening_leader_dummy_reveal():
 
 
 def test_subprocess_tcp_bluechip_controller_spawns_and_cleans_up_process():
+    for bad_timeout in (0, -1.0, float("nan"), float("inf"), float("-inf"), True, False):
+        with pytest.raises(ValueError, match="timeout_secs must be a finite positive number"):
+            SocketBlueChipController(timeout_secs=bad_timeout)  # type: ignore[arg-type]
+
     with pytest.raises(ValueError, match=r"\{port\}"):
         SubprocessTcpBlueChipController(cmd_template=f"{sys.executable} -c 'pass'")
 

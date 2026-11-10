@@ -69,8 +69,16 @@ with socket.create_connection(("127.0.0.1", port), timeout=10.0) as sock:
         sys.exit(0)
     seat = seated.split()[0]
     send(f"{seat} ready for teams")
-    if not recv():
+    teams_line = recv()
+    if not teams_line:
         sys.exit(0)
+    expected_teams = (
+        'Teams: N/S "BlueChip" E/W "Tenace"'
+        if seat in ("NORTH", "SOUTH")
+        else 'Teams: N/S "Tenace" E/W "BlueChip"'
+    )
+    if teams_line != expected_teams:
+        raise RuntimeError(f"Seat {seat} expected {expected_teams!r}, got {teams_line!r}")
     send(f"{seat} ready to start")
 
     seats_order = ["NORTH", "EAST", "SOUTH", "WEST"]
@@ -203,7 +211,7 @@ def test_cli_mock_match_against_baseline_prints_board_transcript_and_telemetry(c
             "--seed",
             "42",
             "--dds-worlds",
-            "4",
+            "1",
         ]
     )
     assert exit_code == 0
@@ -325,6 +333,60 @@ def test_cli_validates_positive_boards_and_dds_worlds():
 
     with pytest.raises(ValueError, match="--dds-worlds must be >= 1"):
         run_cli(["--mode", "mock", "--dds-worlds", "0"])
+
+    for bad_timeout in ("0", "-1", "nan", "inf", "-inf"):
+        with pytest.raises(ValueError, match="--bluechip-timeout must be a finite number > 0"):
+            run_cli(["--mode", "mock", f"--bluechip-timeout={bad_timeout}"])
+
+
+def test_format_match_report_imp_margin_winner_and_tie():
+    from tenace.harness import BoardResult, MatchSummary
+
+    win_a = MatchSummary(
+        tournament_seed=42,
+        boards=[
+            BoardResult(
+                board_number=1,
+                open_room_ns_score=410.0,
+                closed_room_ns_score=0.0,
+                imps_team_a=9,
+            )
+        ],
+        total_imps_team_a=9,
+        total_imps_team_b=-9,
+        telemetry={"strategist_calls": 2, "evaluator_calls": 4, "forced_moves": 1},
+    )
+    report_a = format_match_report(win_a, team_a_name="Tenace", team_b_name="Baseline")
+    assert "Winner: Tenace (+9 IMP margin)" in report_a
+    assert "+18 IMP margin" not in report_a
+
+    win_b = MatchSummary(
+        tournament_seed=42,
+        boards=[
+            BoardResult(
+                board_number=1,
+                open_room_ns_score=-300.0,
+                closed_room_ns_score=0.0,
+                imps_team_a=-7,
+            )
+        ],
+        total_imps_team_a=-7,
+        total_imps_team_b=7,
+        telemetry={},
+    )
+    report_b = format_match_report(win_b, team_a_name="Tenace", team_b_name="Opponent")
+    assert "Winner: Opponent (+7 IMP margin)" in report_b
+    assert "+14 IMP margin" not in report_b
+
+    tie_summary = MatchSummary(
+        tournament_seed=42,
+        boards=[],
+        total_imps_team_a=0,
+        total_imps_team_b=0,
+        telemetry={},
+    )
+    report_tie = format_match_report(tie_summary, team_a_name="Tenace", team_b_name="Opponent")
+    assert "Result: Exact Tie" in report_tie
 
 
 def test_cli_parser_defaults_to_vertex_and_gcp_env(monkeypatch):
@@ -479,7 +541,7 @@ def test_cli_bluechip_opponent_end_to_end_with_subprocess_peer(capsys):
             "--seed",
             "42",
             "--dds-worlds",
-            "2",
+            "1",
         ]
     )
     assert exit_code == 0

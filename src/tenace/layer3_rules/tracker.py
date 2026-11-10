@@ -27,6 +27,7 @@ __all__ = [
     "BoardFactSnapshot",
     "RuleFactTracker",
     "collapse_equivalent_actions",
+    "trick_winner",
 ]
 
 _PLAY_OWN_SLICE = slice(25, 25 + NUM_CARDS)
@@ -133,6 +134,9 @@ def _trick_winner(trick_plays: list[tuple[Seat, int]], trump_denom: int | None) 
         elif not best_is_trump and suit == led_suit and card_rank(card) > card_rank(best_card):
             best_seat, best_card = seat, card
     return best_seat
+
+
+trick_winner = _trick_winner
 
 
 def _cards_from_slice(values: list[float]) -> list[int]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 from typing import TypeVar
@@ -359,10 +360,12 @@ def format_match_report(
         )
         lines.append(sub_ruler)
 
-    if summary.total_imps_team_a > summary.total_imps_team_b:
-        outcome = f"Winner: {team_a_name} (+{summary.total_imps_team_a - summary.total_imps_team_b} IMP margin)"
-    elif summary.total_imps_team_b > summary.total_imps_team_a:
-        outcome = f"Winner: {team_b_name} (+{summary.total_imps_team_b - summary.total_imps_team_a} IMP margin)"
+    if summary.total_imps_team_a > 0:
+        outcome = f"Winner: {team_a_name} (+{summary.total_imps_team_a} IMP margin)"
+    elif summary.total_imps_team_a < 0:
+        outcome = f"Winner: {team_b_name} (+{abs(summary.total_imps_team_a)} IMP margin)"
+    elif summary.total_imps_team_b > 0:
+        outcome = f"Winner: {team_b_name} (+{summary.total_imps_team_b} IMP margin)"
     else:
         outcome = "Result: Exact Tie"
 
@@ -426,6 +429,8 @@ def run_cli(argv: list[str] | None = None) -> int:
         raise ValueError("--boards must be >= 1")
     if args.dds_worlds < 1:
         raise ValueError("--dds-worlds must be >= 1")
+    if not math.isfinite(args.bluechip_timeout) or args.bluechip_timeout <= 0:
+        raise ValueError("--bluechip-timeout must be a finite number > 0")
 
     if args.opponent == "bluechip":
         if not args.bluechip_cmd or not args.bluechip_cmd.strip():
@@ -458,14 +463,15 @@ def run_cli(argv: list[str] | None = None) -> int:
         timeout_secs = args.bluechip_timeout
 
         def team_b_factory(seat: Seat) -> BridgeSeatBot:
+            is_ns = seat in (Seat.NORTH, Seat.SOUTH)
             return BlueChipSeatBot(
                 seat=seat,
                 controller_factory=lambda: SubprocessTcpBlueChipController(
                     cmd_template=cmd_template,
                     timeout_secs=timeout_secs,
                 ),
-                team_ns="Tenace",
-                team_ew="BlueChip",
+                team_ns="BlueChip" if is_ns else "Tenace",
+                team_ew="Tenace" if is_ns else "BlueChip",
             )
     else:
         team_b_name = "Baseline"
