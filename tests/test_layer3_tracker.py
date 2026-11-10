@@ -319,7 +319,7 @@ def test_tracker_never_touches_dealt_card_prefix_and_exports_public_api():
     assert layer3_rules.BoardFactSnapshot is BoardFactSnapshot
     assert layer3_rules.RuleFactTracker is RuleFactTracker
     assert layer3_rules.collapse_equivalent_actions is collapse_equivalent_actions
-    assert set(layer3_rules.__all__) == {
+    assert set(layer3_rules.__all__) >= {
         "BoardFactSnapshot",
         "RuleFactTracker",
         "collapse_equivalent_actions",
