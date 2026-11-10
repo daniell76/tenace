@@ -270,6 +270,11 @@ class DuplicateMatchRunner:
                 )
             state.apply_action(action)
 
+        for bot in seats.values():
+            on_end = getattr(bot, "on_board_end", None)
+            if callable(on_end):
+                on_end(state.clone())
+
         return float(state.returns()[int(Seat.NORTH)])
 
     def play_match(
