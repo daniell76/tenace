@@ -1,5 +1,6 @@
 import pyspiel
 import pytest
+from pydantic import ValidationError
 
 import tenace.layer3_rules as layer3_rules
 from tenace.domain.types import (
@@ -81,6 +82,12 @@ def test_collapse_equivalent_actions_separates_suits_and_rejects_mixed_action_ty
     with pytest.raises(ValueError, match="out of valid OpenSpiel bridge range"):
         collapse_equivalent_actions([90])
 
+    with pytest.raises(ValueError, match="played_cards"):
+        collapse_equivalent_actions([club_5], played_cards={52})
+
+    with pytest.raises(ValueError, match="played_cards"):
+        collapse_equivalent_actions([club_5], played_cards={-1})
+
 
 def test_tracker_hides_unseen_hands_during_auction_and_reveals_dummy_after_lead():
     state = _make_dealt_state()
@@ -103,7 +110,7 @@ def test_tracker_hides_unseen_hands_during_auction_and_reveals_dummy_after_lead(
     pre_lead_east = tracker.extract_facts(state, Seat.EAST)
     assert pre_lead_east.phase == "play"
     assert pre_lead_east.declarer == Seat.NORTH
-    assert pre_lead_east.dummy_seat == Seat.SOUTH
+    assert pre_lead_east.dummy_seat is None
     assert pre_lead_east.trump_denom == 4
     assert pre_lead_east.contract_level == 1
     assert pre_lead_east.dummy_cards == []
@@ -124,6 +131,14 @@ def test_tracker_hides_unseen_hands_during_auction_and_reveals_dummy_after_lead(
         + len(post_lead_east.unseen_cards)
         == 52
     )
+
+    # Observer == dummy_seat post-opening-lead: own_cards == dummy_cards (13 cards)
+    # and unseen_cards has 38 cards (dummy does not see declarer's hand in OpenSpiel).
+    post_lead_dummy = tracker.extract_facts(state, Seat.SOUTH)
+    assert post_lead_dummy.dummy_seat == Seat.SOUTH
+    assert len(post_lead_dummy.own_cards) == 13
+    assert post_lead_dummy.own_cards == post_lead_dummy.dummy_cards
+    assert len(post_lead_dummy.unseen_cards) == 38
 
 
 def test_tracker_detects_suit_showout_void_and_emits_surprise():
@@ -204,7 +219,7 @@ def test_tracker_trump_ruff_trick_winner_and_declarer_first_bidder_rule():
 
     pre_lead = tracker.extract_facts(state, Seat.NORTH)
     assert pre_lead.declarer == Seat.NORTH
-    assert pre_lead.dummy_seat == Seat.SOUTH
+    assert pre_lead.dummy_seat is None
     assert pre_lead.trump_denom == int(Suit.SPADES)
     assert pre_lead.contract_level == 2
 
@@ -309,3 +324,63 @@ def test_tracker_never_touches_dealt_card_prefix_and_exports_public_api():
         "RuleFactTracker",
         "collapse_equivalent_actions",
     }
+
+
+def test_tracker_rejects_incomplete_deal_phase_and_snapshot_validates_bounds():
+    game = pyspiel.load_game("bridge(use_double_dummy_result=false)")
+    undealt_state = game.new_initial_state()
+    tracker = RuleFactTracker()
+
+    with pytest.raises(ValueError, match="Cannot extract facts during incomplete deal phase"):
+        tracker.extract_facts(undealt_state, Seat.NORTH)
+
+    with pytest.raises(ValidationError):
+        BoardFactSnapshot(
+            observer=Seat.NORTH,
+            phase="deal",  # type: ignore[arg-type]
+            own_cards=[],
+            own_hcp=0,
+        )
+
+    with pytest.raises(ValidationError):
+        BoardFactSnapshot(
+            observer=Seat.NORTH,
+            phase="auction",
+            own_cards=[52],
+            own_hcp=0,
+        )
+
+    with pytest.raises(ValidationError):
+        BoardFactSnapshot(
+            observer=Seat.NORTH,
+            phase="auction",
+            own_cards=[],
+            own_hcp=38,
+        )
+
+    with pytest.raises(ValidationError):
+        BoardFactSnapshot(
+            observer=Seat.NORTH,
+            phase="play",
+            own_cards=[],
+            own_hcp=0,
+            contract_level=8,
+        )
+
+    with pytest.raises(ValidationError):
+        BoardFactSnapshot(
+            observer=Seat.NORTH,
+            phase="auction",
+            own_cards=[],
+            own_hcp=0,
+            auction_calls=[(Seat.NORTH, 90)],
+        )
+
+    with pytest.raises(ValidationError):
+        BoardFactSnapshot(
+            observer=Seat.NORTH,
+            phase="auction",
+            own_cards=[],
+            own_hcp=0,
+            auction_calls=[(Seat.NORTH, -1)],
+        )

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from typing import Literal
 
 import pyspiel
 from pydantic import BaseModel, Field
@@ -10,7 +11,9 @@ from tenace.domain.types import (
     FIRST_CONTRACT_BID_ACTION,
     MAX_ACTION,
     NUM_CARDS,
+    ActionId,
     CandidateOption,
+    CardId,
     Seat,
     Suit,
     action_label,
@@ -35,6 +38,9 @@ def collapse_equivalent_actions(
     legal_actions: list[int],
     played_cards: set[int] | None = None,
 ) -> list[CandidateOption]:
+    if played_cards is not None and any(c < 0 or c >= NUM_CARDS for c in played_cards):
+        raise ValueError("played_cards entries must be valid card IDs in [0, 51]")
+
     if not legal_actions:
         return []
 
@@ -95,17 +101,17 @@ def collapse_equivalent_actions(
 
 class BoardFactSnapshot(BaseModel):
     observer: Seat
-    phase: str
-    own_cards: list[int]
-    own_hcp: int
+    phase: Literal["auction", "play", "terminal"]
+    own_cards: list[CardId]
+    own_hcp: int = Field(ge=0, le=37)
     dummy_seat: Seat | None = None
-    dummy_cards: list[int] = Field(default_factory=list)
-    played_cards: list[int] = Field(default_factory=list)
-    unseen_cards: list[int] = Field(default_factory=list)
-    auction_calls: list[tuple[Seat, int]] = Field(default_factory=list)
+    dummy_cards: list[CardId] = Field(default_factory=list)
+    played_cards: list[CardId] = Field(default_factory=list)
+    unseen_cards: list[CardId] = Field(default_factory=list)
+    auction_calls: list[tuple[Seat, ActionId]] = Field(default_factory=list)
     declarer: Seat | None = None
-    trump_denom: int | None = None
-    contract_level: int = 0
+    trump_denom: int | None = Field(default=None, ge=0, le=4)
+    contract_level: int = Field(default=0, ge=0, le=7)
     known_voids: dict[Seat, set[Suit]] = Field(default_factory=dict)
     surprise_events: list[str] = Field(default_factory=list)
 
@@ -142,8 +148,10 @@ class RuleFactTracker:
     ) -> BoardFactSnapshot:
         observer = Seat(observer)
         raw_phase = state.current_phase()
+        if raw_phase == 0:
+            raise ValueError("Cannot extract facts during incomplete deal phase")
         if raw_phase == 1:
-            phase = "auction"
+            phase: Literal["auction", "play", "terminal"] = "auction"
         elif raw_phase == 2:
             phase = "play"
         else:
@@ -183,7 +191,8 @@ class RuleFactTracker:
             contract_level = 1 + offset // 5
             trump_denom = offset % 5
             declarer = first_denom_bidder[(last_bid_seat.partnership, trump_denom)]
-            dummy_seat = declarer.partner
+            if len(play_actions) > 0:
+                dummy_seat = declarer.partner
 
         obs = state.observation_tensor(int(observer))
         if len(play_actions) > 0 and declarer is not None:
