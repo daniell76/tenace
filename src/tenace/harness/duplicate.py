@@ -5,10 +5,23 @@ import random
 from typing import Protocol, runtime_checkable
 
 import pyspiel
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from tenace.domain.types import PASS_ACTION, Seat
+from tenace.domain.types import (
+    BIDDING_ACTION_BASE,
+    DBL_ACTION,
+    DENOMINATION_CHARS,
+    FIRST_CONTRACT_BID_ACTION,
+    MAX_ACTION,
+    NUM_CARDS,
+    PASS_ACTION,
+    RDBL_ACTION,
+    Seat,
+    action_label,
+)
 from tenace.harness.scoring import score_diff_to_imps
+from tenace.layer1_strategist import format_auction_sequence
+from tenace.layer3_rules.tracker import _trick_winner
 
 __all__ = [
     "BoardResult",
@@ -16,6 +29,7 @@ __all__ = [
     "DuplicateMatchRunner",
     "FirstLegalPassBaselineBot",
     "MatchSummary",
+    "RoomTranscript",
 ]
 
 
@@ -56,11 +70,23 @@ class FirstLegalPassBaselineBot:
         return legal[0]
 
 
+class RoomTranscript(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    contract: str
+    auction: str
+    tricks: list[str] = Field(default_factory=list)
+    ns_score: float
+    strategy_traces: dict[str, list[str]] = Field(default_factory=dict)
+
+
 class BoardResult(BaseModel):
     board_number: int = Field(ge=1)
     open_room_ns_score: float
     closed_room_ns_score: float
     imps_team_a: int = Field(ge=-24, le=24)
+    open_room: RoomTranscript | None = None
+    closed_room: RoomTranscript | None = None
 
 
 class MatchSummary(BaseModel):
@@ -68,6 +94,94 @@ class MatchSummary(BaseModel):
     boards: list[BoardResult] = Field(default_factory=list)
     total_imps_team_a: int = 0
     total_imps_team_b: int = 0
+    telemetry: dict[str, int] = Field(default_factory=dict)
+
+
+def _build_room_transcript(
+    state: pyspiel.State,
+    seats: dict[Seat, BridgeSeatBot],
+    ns_score: float,
+) -> RoomTranscript:
+    public_history = state.full_history()[NUM_CARDS:]
+    auction_calls: list[tuple[Seat, int]] = []
+    play_actions: list[int] = []
+    last_bid_seat: Seat | None = None
+    last_bid_action: int | None = None
+    first_denom_bidder: dict[tuple[int, int], Seat] = {}
+
+    for entry in public_history:
+        action = entry.action
+        if action >= BIDDING_ACTION_BASE:
+            seat = Seat(entry.player)
+            auction_calls.append((seat, action))
+            if FIRST_CONTRACT_BID_ACTION <= action <= MAX_ACTION:
+                denom = (action - FIRST_CONTRACT_BID_ACTION) % 5
+                key = (seat.partnership, denom)
+                if key not in first_denom_bidder:
+                    first_denom_bidder[key] = seat
+                last_bid_seat = seat
+                last_bid_action = action
+        else:
+            play_actions.append(action)
+
+    auction_str = format_auction_sequence(auction_calls)
+
+    if last_bid_seat is None or last_bid_action is None:
+        contract_str = "Passed Out"
+        declarer: Seat | None = None
+        trump_denom: int | None = None
+    else:
+        offset = last_bid_action - FIRST_CONTRACT_BID_ACTION
+        contract_level = 1 + offset // 5
+        trump_denom = offset % 5
+        declarer = first_denom_bidder[(last_bid_seat.partnership, trump_denom)]
+        denom_str = DENOMINATION_CHARS[trump_denom]
+        doubled_suffix = ""
+        for _, call in reversed(auction_calls):
+            if call == RDBL_ACTION:
+                doubled_suffix = "XX"
+                break
+            if call == DBL_ACTION:
+                doubled_suffix = "X"
+                break
+            if call >= FIRST_CONTRACT_BID_ACTION:
+                break
+        contract_str = f"{contract_level}{denom_str}{doubled_suffix} by {declarer.name}"
+
+    tricks: list[str] = []
+    if declarer is not None and play_actions:
+        leader = Seat((int(declarer) + 1) % 4)
+        for trick_idx, trick_start in enumerate(range(0, len(play_actions), 4), start=1):
+            trick_cards = play_actions[trick_start : trick_start + 4]
+            trick_plays: list[tuple[Seat, int]] = [
+                (Seat((int(leader) + offset_idx) % 4), card)
+                for offset_idx, card in enumerate(trick_cards)
+            ]
+            cards_fmt = " ".join(
+                f"{seat_p.name[0]}:{action_label(card)}" for seat_p, card in trick_plays
+            )
+            if len(trick_plays) == 4:
+                winner = _trick_winner(trick_plays, trump_denom)
+                tricks.append(f"Trick {trick_idx}: {cards_fmt} -> {winner.name}")
+                leader = winner
+            else:
+                tricks.append(f"Trick {trick_idx}: {cards_fmt}")
+
+    strategy_traces: dict[str, list[str]] = {}
+    for seat, bot in seats.items():
+        history = getattr(bot, "strategy_history", None)
+        if history:
+            strategy_traces[seat.name] = [
+                f"rev {s.revision} ({s.phase}): {s.plan_summary}" for s in history
+            ]
+
+    return RoomTranscript(
+        contract=contract_str,
+        auction=auction_str,
+        tricks=tricks,
+        ns_score=ns_score,
+        strategy_traces=strategy_traces,
+    )
 
 
 def _wbf_board_params(board_number: int) -> tuple[int, bool, bool]:
@@ -169,44 +283,90 @@ class DuplicateMatchRunner:
 
         # Separate per-room bot instances prevent any cross-room or cross-seat memory leakage:
         # Open Room: Team A sits North/South, Team B sits East/West
-        open_room_seats: dict[Seat, BridgeSeatBot] = {
-            Seat.NORTH: team_a_factory(Seat.NORTH),
-            Seat.SOUTH: team_a_factory(Seat.SOUTH),
-            Seat.EAST: team_b_factory(Seat.EAST),
-            Seat.WEST: team_b_factory(Seat.WEST),
-        }
         # Closed Room: Team B sits North/South, Team A sits East/West
-        closed_room_seats: dict[Seat, BridgeSeatBot] = {
-            Seat.NORTH: team_b_factory(Seat.NORTH),
-            Seat.SOUTH: team_b_factory(Seat.SOUTH),
-            Seat.EAST: team_a_factory(Seat.EAST),
-            Seat.WEST: team_a_factory(Seat.WEST),
-        }
+        open_room_seats: dict[Seat, BridgeSeatBot] = {}
+        closed_room_seats: dict[Seat, BridgeSeatBot] = {}
+        body_exc: BaseException | None = None
 
-        board_results: list[BoardResult] = []
-        total_imps_a = 0
+        try:
+            open_room_seats[Seat.NORTH] = team_a_factory(Seat.NORTH)
+            open_room_seats[Seat.SOUTH] = team_a_factory(Seat.SOUTH)
+            open_room_seats[Seat.EAST] = team_b_factory(Seat.EAST)
+            open_room_seats[Seat.WEST] = team_b_factory(Seat.WEST)
 
-        for board_num in range(1, num_boards + 1):
-            open_state = self._new_dealt_board_state(board_num)
-            closed_state = self._new_dealt_board_state(board_num)
+            closed_room_seats[Seat.NORTH] = team_b_factory(Seat.NORTH)
+            closed_room_seats[Seat.SOUTH] = team_b_factory(Seat.SOUTH)
+            closed_room_seats[Seat.EAST] = team_a_factory(Seat.EAST)
+            closed_room_seats[Seat.WEST] = team_a_factory(Seat.WEST)
 
-            open_ns = self._play_room(open_state, open_room_seats)
-            closed_ns = self._play_room(closed_state, closed_room_seats)
+            board_results: list[BoardResult] = []
+            total_imps_a = 0
 
-            imps_a = score_diff_to_imps(open_ns - closed_ns)
-            total_imps_a += imps_a
-            board_results.append(
-                BoardResult(
-                    board_number=board_num,
-                    open_room_ns_score=open_ns,
-                    closed_room_ns_score=closed_ns,
-                    imps_team_a=imps_a,
+            for board_num in range(1, num_boards + 1):
+                open_state = self._new_dealt_board_state(board_num)
+                closed_state = self._new_dealt_board_state(board_num)
+
+                open_ns = self._play_room(open_state, open_room_seats)
+                open_transcript = _build_room_transcript(
+                    open_state, open_room_seats, open_ns
                 )
-            )
 
-        return MatchSummary(
-            tournament_seed=self.tournament_seed,
-            boards=board_results,
-            total_imps_team_a=total_imps_a,
-            total_imps_team_b=-total_imps_a,
-        )
+                closed_ns = self._play_room(closed_state, closed_room_seats)
+                closed_transcript = _build_room_transcript(
+                    closed_state, closed_room_seats, closed_ns
+                )
+
+                imps_a = score_diff_to_imps(open_ns - closed_ns)
+                total_imps_a += imps_a
+                board_results.append(
+                    BoardResult(
+                        board_number=board_num,
+                        open_room_ns_score=open_ns,
+                        closed_room_ns_score=closed_ns,
+                        imps_team_a=imps_a,
+                        open_room=open_transcript,
+                        closed_room=closed_transcript,
+                    )
+                )
+
+            all_bots = list(open_room_seats.values()) + list(closed_room_seats.values())
+            telemetry = {
+                "forced_moves": sum(int(getattr(bot, "forced_moves", 0)) for bot in all_bots),
+                "strategist_calls": sum(
+                    int(getattr(bot, "strategist_calls", 0)) for bot in all_bots
+                ),
+                "evaluator_calls": sum(
+                    int(getattr(bot, "evaluator_calls", 0)) for bot in all_bots
+                ),
+            }
+
+            return MatchSummary(
+                tournament_seed=self.tournament_seed,
+                boards=board_results,
+                total_imps_team_a=total_imps_a,
+                total_imps_team_b=-total_imps_a,
+                telemetry=telemetry,
+            )
+        except BaseException as exc:
+            body_exc = exc
+            raise
+        finally:
+            all_created_bots = list(open_room_seats.values()) + list(
+                closed_room_seats.values()
+            )
+            close_errors: list[Exception] = []
+            for bot in all_created_bots:
+                close_fn = getattr(bot, "close", None)
+                if callable(close_fn):
+                    try:
+                        close_fn()
+                    except Exception as close_exc:
+                        close_errors.append(close_exc)
+            if close_errors and body_exc is None:
+                first_err = close_errors[0]
+                for extra_err in close_errors[1:]:
+                    first_err.add_note(f"Additional close() error: {extra_err!r}")
+                raise first_err
+            if close_errors and body_exc is not None:
+                for close_err in close_errors:
+                    body_exc.add_note(f"Suppressed close() error during unwind: {close_err!r}")

@@ -15,6 +15,7 @@ from tenace import (
     SAYC_CONVENTION_CARD,
     DiffusionGemmaClient,
     DuplicateMatchRunner,
+    RoomTranscript,
     Seat,
     TenaceAgent,
     VertexGeminiClient,
@@ -33,6 +34,7 @@ from tenace.harness import (
     BridgeSeatBot,
     FirstLegalPassBaselineBot,
     MatchSummary,
+    RoomTranscript as HarnessRoomTranscript,
     score_diff_to_imps,
 )
 from tenace.layer3_rules import RuleDDSEvaluator
@@ -82,6 +84,7 @@ def test_public_exports_for_agent_harness_and_top_level_package():
         "DuplicateMatchRunner",
         "FirstLegalPassBaselineBot",
         "MatchSummary",
+        "RoomTranscript",
     }
     assert set(harness_pkg.__all__) >= {
         "BoardResult",
@@ -89,12 +92,14 @@ def test_public_exports_for_agent_harness_and_top_level_package():
         "DuplicateMatchRunner",
         "FirstLegalPassBaselineBot",
         "MatchSummary",
+        "RoomTranscript",
         "score_diff_to_imps",
     }
     assert set(agent_mod.__all__) >= {"TenaceAgent"}
     assert set(tenace.__all__) >= {
         "DiffusionGemmaClient",
         "DuplicateMatchRunner",
+        "RoomTranscript",
         "SAYC_CONVENTION_CARD",
         "Seat",
         "TenaceAgent",
@@ -103,6 +108,9 @@ def test_public_exports_for_agent_harness_and_top_level_package():
     assert tenace.TenaceAgent is TenaceAgent
     assert tenace.Seat is Seat
     assert tenace.DuplicateMatchRunner is DuplicateMatchRunner
+    assert tenace.RoomTranscript is RoomTranscript
+    assert HarnessRoomTranscript is RoomTranscript
+    assert duplicate_mod.RoomTranscript is RoomTranscript
     assert tenace.VertexGeminiClient is VertexGeminiClient
     assert tenace.DiffusionGemmaClient is DiffusionGemmaClient
     assert tenace.SAYC_CONVENTION_CARD is SAYC_CONVENTION_CARD
@@ -434,15 +442,22 @@ def test_tenace_agent_reruns_strategist_when_layer2_flags_assumption_violation()
     assert agent.strategy is not None
     assert agent.strategy.revision == 2
     assert agent.strategy.plan_summary == "Revised auction plan doubling or passing"
+    assert [
+        (s.revision, s.phase, s.plan_summary) for s in agent.strategy_history
+    ] == [
+        (1, "auction", "Initial auction plan assuming grand slam values"),
+        (2, "auction", "Revised auction plan doubling or passing"),
+    ]
     # Confirm violation_reason was forwarded into Strategist replan prompt
     second_strat_prompt = strat_client.calls[1]["user_prompt"]
     assert "Hand has 9 HCP, contradicting 37 HCP grand slam assumption" in second_strat_prompt
 
-    # Resetting for next board clears strategy, voids, and _dummy_seen while keeping cumulative stats
+    # Resetting for next board clears strategy, strategy_history, voids, and _dummy_seen while keeping cumulative stats
     agent._dummy_seen = True
     agent._prev_voids = {s: {Suit.CLUBS} for s in Seat}
     agent.reset_for_board()
     assert agent.strategy is None
+    assert agent.strategy_history == []
     assert agent._prev_voids is None
     assert agent._dummy_seen is False
     assert agent.strategist_calls == 2
@@ -691,4 +706,249 @@ def test_first_legal_pass_baseline_bot_rejects_wrong_seat_terminal_and_undealt_s
         terminal.apply_action(PASS_ACTION)
     with pytest.raises(ValueError, match="terminal"):
         north_bot.step(terminal)
+
+
+def test_duplicate_runner_records_room_transcripts_strategy_history_and_closes_bots():
+    import re
+    from pydantic import ValidationError
+
+    closed_seats: list[Seat] = []
+
+    class ClosableBaselineBot(FirstLegalPassBaselineBot):
+        def close(self) -> None:
+            closed_seats.append(self.seat)
+
+    class ScriptedStrategistClient:
+        def __init__(self, seat: Seat) -> None:
+            self.seat = seat
+            self.calls = 0
+
+        def generate_structured(
+            self,
+            system_prompt: str,
+            user_prompt: str,
+            schema: type[T],
+        ) -> T:
+            self.calls += 1
+            phase = "play" if "Phase: play" in user_prompt else "auction"
+            resp = StrategyState(
+                phase=phase,  # type: ignore[arg-type]
+                plan_summary=f"{self.seat.name} {phase} plan #{self.calls}",
+                target_or_threat="Control tempo",
+            )
+            assert isinstance(resp, schema)
+            return resp
+
+    class ScriptedEvaluatorClient:
+        def __init__(self, seat: Seat) -> None:
+            self.seat = seat
+            self._triggered_interrupt = False
+
+        def generate_structured(
+            self,
+            system_prompt: str,
+            user_prompt: str,
+            schema: type[T],
+        ) -> T:
+            # Extract candidate labels from "- LABEL: baseline_ev=..."
+            labels = re.findall(r"^- ([^:]+): baseline_ev=", user_prompt, flags=re.MULTILINE)
+            # In Open Room on Board 1, North opens 1NT (if legal) and triggers one assumption violation interrupt
+            if (
+                self.seat == Seat.NORTH
+                and "Phase: auction" in user_prompt
+                and "1NT" in labels
+            ):
+                if not self._triggered_interrupt:
+                    self._triggered_interrupt = True
+                    resp = TacticalDecision(
+                        assumption_violated=True,
+                        violation_reason="Re-check NT range before opening 1NT",
+                        option_scores={"1NT": 1.0, "Pass": 0.1},
+                        rationale="Trigger interrupt once then open 1NT",
+                    )
+                else:
+                    resp = TacticalDecision(
+                        assumption_violated=False,
+                        option_scores={"1NT": 1.0, "Pass": 0.1},
+                        rationale="Open 1NT",
+                    )
+            elif "Phase: auction" in user_prompt and "Pass" in labels:
+                resp = TacticalDecision(
+                    assumption_violated=False,
+                    option_scores={"Pass": 1.0},
+                    rationale="Pass cleanly",
+                )
+            else:
+                scores = {labels[0]: 1.0} if labels else {}
+                resp = TacticalDecision(
+                    assumption_violated=False,
+                    option_scores=scores,
+                    rationale="Play top candidate",
+                )
+            assert isinstance(resp, schema)
+            return resp
+
+    created_tenace: list[TenaceAgent] = []
+
+    def make_tenace(seat: Seat) -> TenaceAgent:
+        # Use max_make_prob_drop=1.0 so North's scripted 1NT bid isn't blocked by DDS make_prob gate
+        agent = TenaceAgent(
+            seat=seat,
+            strategist_client=ScriptedStrategistClient(seat),
+            evaluator_client=ScriptedEvaluatorClient(seat),
+            dds_evaluator=RuleDDSEvaluator(num_worlds=2, max_make_prob_drop=1.0, rng_seed=7),
+        )
+        created_tenace.append(agent)
+        return agent
+
+    runner = DuplicateMatchRunner(tournament_seed=42, use_double_dummy_result=False)
+    summary = runner.play_match(
+        team_a_factory=make_tenace,
+        team_b_factory=ClosableBaselineBot,
+        num_boards=1,
+    )
+
+    # Extra fields must be forbidden on RoomTranscript
+    with pytest.raises(ValidationError):
+        RoomTranscript(
+            contract="Passed Out",
+            auction="NORTH:Pass -> EAST:Pass -> SOUTH:Pass -> WEST:Pass",
+            ns_score=0.0,
+            unexpected_field="nope",  # type: ignore[call-arg]
+        )
+
+    board = summary.boards[0]
+    assert isinstance(board.open_room, RoomTranscript)
+    assert isinstance(board.closed_room, RoomTranscript)
+
+    # Open Room: North opened 1NT and everybody passed -> 13 played tricks!
+    assert board.open_room.contract == "1NT by NORTH"
+    assert board.open_room.auction == "NORTH:1NT -> EAST:Pass -> SOUTH:Pass -> WEST:Pass"
+    assert board.open_room.ns_score == board.open_room_ns_score
+    assert len(board.open_room.tricks) == 13
+    trick1_pattern = re.compile(
+        r"^Trick 1: E:[CDHS]:[2-9TJQKA] S:[CDHS]:[2-9TJQKA] W:[CDHS]:[2-9TJQKA] N:[CDHS]:[2-9TJQKA] -> (NORTH|EAST|SOUTH|WEST)$"
+    )
+    assert trick1_pattern.match(board.open_room.tricks[0]), board.open_room.tricks[0]
+
+    # North had rev 1 (initial auction), rev 2 (interrupt replan), plus play-phase replan(s)
+    assert "NORTH" in board.open_room.strategy_traces
+    north_traces = board.open_room.strategy_traces["NORTH"]
+    assert north_traces[0] == "rev 1 (auction): NORTH auction plan #1"
+    assert north_traces[1] == "rev 2 (auction): NORTH auction plan #2"
+    assert any(t.startswith("rev 3 (play):") for t in north_traces)
+    # Baseline bots (EAST, WEST in Open Room) have no strategy_history so they do not appear in strategy_traces
+    assert "EAST" not in board.open_room.strategy_traces
+    assert "WEST" not in board.open_room.strategy_traces
+
+    # Closed Room: North (ClosableBaselineBot) passed, East (Tenace) passed, South passed, West passed -> Passed Out!
+    assert board.closed_room.contract == "Passed Out"
+    assert board.closed_room.auction == "NORTH:Pass -> EAST:Pass -> SOUTH:Pass -> WEST:Pass"
+    assert board.closed_room.tricks == []
+    assert board.closed_room.ns_score == 0.0
+    assert "EAST" in board.closed_room.strategy_traces
+    assert "WEST" in board.closed_room.strategy_traces
+    assert "NORTH" not in board.closed_room.strategy_traces
+
+    # Telemetry sums across all 8 bots
+    expected_forced = sum(a.forced_moves for a in created_tenace)
+    expected_strat = sum(a.strategist_calls for a in created_tenace)
+    expected_eval = sum(a.evaluator_calls for a in created_tenace)
+    assert summary.telemetry == {
+        "forced_moves": expected_forced,
+        "strategist_calls": expected_strat,
+        "evaluator_calls": expected_eval,
+    }
+    assert summary.telemetry["strategist_calls"] >= 4
+    assert summary.telemetry["evaluator_calls"] >= 4
+
+    # 2 Team-B seats in Open Room (E, W) + 2 Team-B seats in Closed Room (N, S) = 4 closed bots
+    assert len(closed_seats) == 4
+    assert sorted(s.name for s in closed_seats) == ["EAST", "NORTH", "SOUTH", "WEST"]
+
+    # Double-dummy mode produces empty tricks list even on non-passed-out contracts
+    dd_closed: list[Seat] = []
+
+    class DDClosableBot(FirstLegalPassBaselineBot):
+        def close(self) -> None:
+            dd_closed.append(self.seat)
+
+    dd_runner = DuplicateMatchRunner(tournament_seed=42, use_double_dummy_result=True)
+    dd_summary = dd_runner.play_match(
+        team_a_factory=make_tenace,
+        team_b_factory=DDClosableBot,
+        num_boards=1,
+    )
+    assert dd_summary.boards[0].open_room is not None
+    assert dd_summary.boards[0].open_room.contract == "1NT by NORTH"
+    assert dd_summary.boards[0].open_room.tricks == []
+    assert len(dd_closed) == 4
+
+
+def test_duplicate_runner_closes_all_bots_in_finally_when_bot_raises_mid_board():
+    # Also verify doubled ("4SX by SOUTH") and redoubled ("4SXX by SOUTH") contract formatting
+    # and trump ruff trick winner formatting in _build_room_transcript!
+    dbl_state = duplicate_mod.pyspiel.load_game("bridge(use_double_dummy_result=true)").new_initial_state(
+        tournament_seed=42, board_number=1
+    )
+    dbl_state.apply_action(PASS_ACTION)  # N
+    dbl_state.apply_action(PASS_ACTION)  # E
+    dbl_state.apply_action(73)           # S bids 4S (55 + 3*5 + 3 = 73)
+    dbl_state.apply_action(53)           # W Doubles
+    dbl_state.apply_action(PASS_ACTION)  # N
+    dbl_state.apply_action(PASS_ACTION)  # E
+    dbl_state.apply_action(PASS_ACTION)  # S
+    dbl_tx = duplicate_mod._build_room_transcript(dbl_state, {}, float(dbl_state.returns()[0]))
+    assert dbl_tx.contract == "4SX by SOUTH"
+
+    closed_bots: list[tuple[str, Seat]] = []
+
+    class ExplodingClosableBot:
+        def __init__(self, seat: Seat, team: str) -> None:
+            self.seat = seat
+            self.team = team
+
+        def reset_for_board(self) -> None:
+            return None
+
+        def step(self, state: pyspiel.State) -> int:
+            if self.team == "A" and self.seat == Seat.NORTH:
+                raise ValueError("Simulated mid-board bot failure")
+            return PASS_ACTION
+
+        def close(self) -> None:
+            closed_bots.append((self.team, self.seat))
+
+    runner = DuplicateMatchRunner(tournament_seed=42, use_double_dummy_result=False)
+    with pytest.raises(ValueError, match="Simulated mid-board bot failure"):
+        runner.play_match(
+            team_a_factory=lambda s: ExplodingClosableBot(s, "A"),
+            team_b_factory=lambda s: ExplodingClosableBot(s, "B"),
+            num_boards=2,
+        )
+
+    # All 8 room bots (4 in Open Room + 4 in Closed Room) MUST have close() called!
+    assert len(closed_bots) == 8
+
+    # Even if one bot's close() raises during teardown, the remaining bots still get close() called!
+    close_calls_with_failing_close: list[tuple[str, Seat]] = []
+
+    class CloseRaisingBot(FirstLegalPassBaselineBot):
+        def __init__(self, seat: Seat, team: str) -> None:
+            super().__init__(seat)
+            self.team = team
+
+        def close(self) -> None:
+            close_calls_with_failing_close.append((self.team, self.seat))
+            if self.team == "A" and self.seat == Seat.NORTH:
+                raise RuntimeError("Teardown failure on Open Room North")
+
+    with pytest.raises(RuntimeError, match="Teardown failure on Open Room North"):
+        runner.play_match(
+            team_a_factory=lambda s: CloseRaisingBot(s, "A"),
+            team_b_factory=lambda s: CloseRaisingBot(s, "B"),
+            num_boards=1,
+        )
+    assert len(close_calls_with_failing_close) == 8
+
 

@@ -42,6 +42,7 @@ class TenaceAgent:
         )
 
         self.strategy: StrategyState | None = None
+        self.strategy_history: list[StrategyState] = []
         self._prev_voids: dict[Seat, set[Suit]] | None = None
         self._dummy_seen: bool = False
 
@@ -52,6 +53,7 @@ class TenaceAgent:
     def reset_for_board(self) -> None:
         """Clear board-scoped state while preserving cumulative telemetry counters."""
         self.strategy = None
+        self.strategy_history = []
         self._prev_voids = None
         self._dummy_seen = False
 
@@ -123,6 +125,7 @@ class TenaceAgent:
                 self.strategy,
                 trigger_reason="; ".join(trigger_reasons),
             )
+            self.strategy_history.append(self.strategy)
             self.strategist_calls += 1
             if facts.dummy_seat is not None:
                 self._dummy_seen = True
@@ -157,6 +160,7 @@ class TenaceAgent:
                 self.strategy,
                 trigger_reason=reason,
             )
+            self.strategy_history.append(self.strategy)
             self.strategist_calls += 1
             if facts.dummy_seat is not None:
                 self._dummy_seen = True

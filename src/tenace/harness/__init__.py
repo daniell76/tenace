@@ -4,6 +4,7 @@ from tenace.harness.duplicate import (
     DuplicateMatchRunner,
     FirstLegalPassBaselineBot,
     MatchSummary,
+    RoomTranscript,
 )
 from tenace.harness.scoring import score_diff_to_imps
 
@@ -13,5 +14,6 @@ __all__ = [
     "DuplicateMatchRunner",
     "FirstLegalPassBaselineBot",
     "MatchSummary",
+    "RoomTranscript",
     "score_diff_to_imps",
 ]
