@@ -5,10 +5,11 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from pydantic import ValidationError
+from google.genai import _api_client, models as genai_models, types as genai_types
+from pydantic import BaseModel, ValidationError
 
 import tenace.models as models
-from tenace.domain.types import StrategyState, TacticalDecision
+from tenace.domain.types import Seat, StrategyState, Suit, TacticalDecision
 from tenace.models import (
     DiffusionGemmaClient,
     DiffusionSamplingConfig,
@@ -76,6 +77,105 @@ def test_extract_json_object_prefers_json_fence_over_earlier_code_fence():
     assert decision.rationale == "pick second fence"
 
 
+def test_extract_json_object_skips_earlier_non_matching_json_dicts():
+    class StrictActionScore(BaseModel):
+        chosen_action: str
+        score: float
+
+    raw = (
+        'Previous context: {"foo": 1, "bar": "illustrative"}\n'
+        'Final answer: {"chosen_action": "S:A", "score": 0.92}\n'
+    )
+    parsed = extract_json_object(raw, StrictActionScore)
+    assert parsed.chosen_action == "S:A"
+    assert parsed.score == pytest.approx(0.92)
+
+    with pytest.raises(ValidationError):
+        extract_json_object('First: {"foo": 1}\nSecond: {"bar": 2}', StrictActionScore)
+
+
+def test_extract_json_object_strategy_state_numeric_and_named_enum_keys():
+    numeric_raw = json.dumps(
+        {
+            "phase": "auction",
+            "plan_summary": "Numeric enum keys",
+            "seat_constraints": {
+                "1": {
+                    "seat": 1,
+                    "min_hcp": 12,
+                    "max_hcp": 16,
+                    "min_suit_lengths": {"3": 5, "0": 2},
+                }
+            },
+        }
+    )
+    numeric_state = extract_json_object(numeric_raw, StrategyState)
+    east_num = numeric_state.seat_constraints[Seat.EAST]
+    assert east_num.seat == Seat.EAST
+    assert east_num.min_suit_lengths[Suit.SPADES] == 5
+    assert east_num.min_suit_lengths[Suit.CLUBS] == 2
+
+    named_raw = json.dumps(
+        {
+            "phase": "play",
+            "plan_summary": "Named enum keys",
+            "seat_constraints": {
+                "EAST": {
+                    "seat": "east",
+                    "min_hcp": 10,
+                    "max_hcp": 15,
+                    "min_suit_lengths": {"SPADES": 5, "c": 3},
+                    "max_suit_lengths": {"Hearts": 2, "D": 4},
+                },
+                "w": {
+                    "seat": "W",
+                    "min_suit_lengths": {"h": 4},
+                },
+                "North": {
+                    "seat": "N",
+                },
+                "s": {
+                    "seat": "south",
+                },
+            },
+        }
+    )
+    named_state = extract_json_object(named_raw, StrategyState)
+    east_named = named_state.seat_constraints[Seat.EAST]
+    assert east_named.seat == Seat.EAST
+    assert east_named.min_suit_lengths == {Suit.SPADES: 5, Suit.CLUBS: 3}
+    assert east_named.max_suit_lengths == {Suit.HEARTS: 2, Suit.DIAMONDS: 4}
+    assert named_state.seat_constraints[Seat.WEST].min_suit_lengths == {Suit.HEARTS: 4}
+    assert named_state.seat_constraints[Seat.NORTH].seat == Seat.NORTH
+    assert named_state.seat_constraints[Seat.SOUTH].seat == Seat.SOUTH
+
+    # Omitted inner "seat" field is inferred from outer dict key; mismatched key/seat raises
+    inferred_seat = extract_json_object(
+        json.dumps(
+            {
+                "phase": "auction",
+                "plan_summary": "Inferred seat",
+                "seat_constraints": {"WEST": {"min_hcp": 8}},
+            }
+        ),
+        StrategyState,
+    )
+    assert inferred_seat.seat_constraints[Seat.WEST].seat == Seat.WEST
+    assert inferred_seat.seat_constraints[Seat.WEST].min_hcp == 8
+
+    with pytest.raises(ValidationError):
+        extract_json_object(
+            json.dumps(
+                {
+                    "phase": "auction",
+                    "plan_summary": "Mismatched seat",
+                    "seat_constraints": {"EAST": {"seat": "WEST", "min_hcp": 10}},
+                }
+            ),
+            StrategyState,
+        )
+
+
 def test_extract_json_object_error_cases():
     with pytest.raises(ValueError, match="Empty"):
         extract_json_object("", TacticalDecision)
@@ -138,7 +238,24 @@ def test_vertex_gemini_client_parses_structured_response():
     assert captured["config"].system_instruction == "You are a Bridge strategist."
     assert captured["config"].temperature == pytest.approx(0.15)
     assert captured["config"].response_mime_type == "application/json"
-    assert captured["config"].response_schema is StrategyState
+    assert captured["config"].response_schema is None
+    assert captured["config"].response_json_schema == StrategyState.model_json_schema()
+
+    # Regression test: real google-genai Vertex serializer must accept StrategyState's JSON schema
+    # (dict[Seat, SeatConstraint] emits "propertyNames", which crashes response_schema=StrategyState).
+    api_client = _api_client.BaseApiClient(
+        vertexai=True,
+        project="test-bridge-proj",
+        location="global",
+    )
+    params = genai_types._GenerateContentParameters(
+        model=captured["model"],
+        contents=captured["contents"],
+        config=captured["config"],
+    )
+    vertex_payload = genai_models._GenerateContentParameters_to_vertex(api_client, params)
+    assert vertex_payload["generationConfig"]["responseMimeType"] == "application/json"
+    assert "responseJsonSchema" in vertex_payload["generationConfig"]
 
 
 def test_vertex_gemini_client_validation_and_empty_response():

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 import json
 import math
 import re
@@ -8,7 +9,7 @@ from typing import Any, Protocol, TypeVar, runtime_checkable
 from google import genai
 from google.cloud import aiplatform
 from google.genai import types as genai_types
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -35,21 +36,23 @@ class StructuredModelClient(Protocol):
     ) -> T: ...
 
 
-def _find_first_json_object_slice(text: str) -> str | None:
+def _iter_json_object_slices(text: str) -> Iterator[str]:
     decoder = json.JSONDecoder()
     search_from = 0
     while True:
         brace_idx = text.find("{", search_from)
         if brace_idx == -1:
-            return None
+            return
         try:
             obj, end_idx = decoder.raw_decode(text, brace_idx)
         except json.JSONDecodeError:
             search_from = brace_idx + 1
             continue
         if isinstance(obj, dict):
-            return text[brace_idx:end_idx]
-        search_from = brace_idx + 1
+            yield text[brace_idx:end_idx]
+            search_from = end_idx
+        else:
+            search_from = brace_idx + 1
 
 
 def extract_json_object(raw_text: str, schema: type[T]) -> T:
@@ -64,10 +67,16 @@ def extract_json_object(raw_text: str, schema: type[T]) -> T:
     candidates.extend(m.group(1).strip() for m in _ANY_FENCE_RE.finditer(cleaned))
     candidates.append(cleaned)
 
+    last_validation_error: ValidationError | None = None
     for candidate in candidates:
-        json_slice = _find_first_json_object_slice(candidate)
-        if json_slice is not None:
-            return schema.model_validate_json(json_slice)
+        for json_slice in _iter_json_object_slices(candidate):
+            try:
+                return schema.model_validate_json(json_slice)
+            except ValidationError as exc:
+                last_validation_error = exc
+
+    if last_validation_error is not None:
+        raise last_validation_error
 
     raise ValueError("No valid JSON object found in model response")
 
@@ -112,7 +121,7 @@ class VertexGeminiClient:
                 system_instruction=system_prompt,
                 temperature=self.temperature,
                 response_mime_type="application/json",
-                response_schema=schema,
+                response_json_schema=schema.model_json_schema(),
             ),
         )
         text = getattr(resp, "text", None)

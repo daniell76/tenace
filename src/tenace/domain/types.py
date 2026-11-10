@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from enum import IntEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -122,6 +122,49 @@ def hand_hcp(cards: Iterable[int]) -> int:
     return sum(HCP_BY_RANK.get(card_rank(c), 0) for c in card_list)
 
 
+_SEAT_NAME_ALIASES: dict[str, Seat] = {
+    "NORTH": Seat.NORTH,
+    "N": Seat.NORTH,
+    "EAST": Seat.EAST,
+    "E": Seat.EAST,
+    "SOUTH": Seat.SOUTH,
+    "S": Seat.SOUTH,
+    "WEST": Seat.WEST,
+    "W": Seat.WEST,
+}
+
+_SUIT_NAME_ALIASES: dict[str, Suit] = {
+    "CLUBS": Suit.CLUBS,
+    "CLUB": Suit.CLUBS,
+    "C": Suit.CLUBS,
+    "DIAMONDS": Suit.DIAMONDS,
+    "DIAMOND": Suit.DIAMONDS,
+    "D": Suit.DIAMONDS,
+    "HEARTS": Suit.HEARTS,
+    "HEART": Suit.HEARTS,
+    "H": Suit.HEARTS,
+    "SPADES": Suit.SPADES,
+    "SPADE": Suit.SPADES,
+    "S": Suit.SPADES,
+}
+
+
+def _coerce_seat_value(value: Any) -> Any:
+    if isinstance(value, str):
+        alias = _SEAT_NAME_ALIASES.get(value.strip().upper())
+        if alias is not None:
+            return alias
+    return value
+
+
+def _coerce_suit_value(value: Any) -> Any:
+    if isinstance(value, str):
+        alias = _SUIT_NAME_ALIASES.get(value.strip().upper())
+        if alias is not None:
+            return alias
+    return value
+
+
 class SeatConstraint(BaseModel):
     seat: Seat
     min_hcp: int = Field(default=0, ge=0, le=37)
@@ -129,6 +172,22 @@ class SeatConstraint(BaseModel):
     min_suit_lengths: dict[Suit, SuitLength] = Field(default_factory=dict)
     max_suit_lengths: dict[Suit, SuitLength] = Field(default_factory=dict)
     likely_cards: list[CardId] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_enum_names(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        if "seat" in normalized:
+            normalized["seat"] = _coerce_seat_value(normalized["seat"])
+        for dict_field in ("min_suit_lengths", "max_suit_lengths"):
+            raw_map = normalized.get(dict_field)
+            if isinstance(raw_map, dict):
+                normalized[dict_field] = {
+                    _coerce_suit_value(k): v for k, v in raw_map.items()
+                }
+        return normalized
 
     @model_validator(mode="after")
     def _validate_bounds(self) -> SeatConstraint:
@@ -158,6 +217,34 @@ class StrategyState(BaseModel):
     assumptions: list[Assumption] = Field(default_factory=list)
     seat_constraints: dict[Seat, SeatConstraint] = Field(default_factory=dict)
     revision: int = 0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_seat_constraint_keys(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        raw_constraints = data.get("seat_constraints")
+        if not isinstance(raw_constraints, dict):
+            return data
+        normalized = dict(data)
+        coerced_constraints: dict[Any, Any] = {}
+        for key, constraint in raw_constraints.items():
+            coerced_key = _coerce_seat_value(key)
+            if isinstance(constraint, dict) and "seat" not in constraint:
+                constraint = {**constraint, "seat": coerced_key}
+            coerced_constraints[coerced_key] = constraint
+        normalized["seat_constraints"] = coerced_constraints
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_seat_constraint_consistency(self) -> StrategyState:
+        for seat_key, constraint in self.seat_constraints.items():
+            if constraint.seat != seat_key:
+                raise ValueError(
+                    f"seat_constraints key {seat_key.name} does not match "
+                    f"constraint.seat {constraint.seat.name}"
+                )
+        return self
 
 
 class CandidateOption(BaseModel):
