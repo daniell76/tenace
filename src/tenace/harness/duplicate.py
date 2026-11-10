@@ -37,7 +37,17 @@ class FirstLegalPassBaselineBot:
 
     def step(self, state: pyspiel.State) -> int:
         if state.is_terminal():
-            raise ValueError("Cannot step on terminal state")
+            raise ValueError("Cannot step on a terminal bridge state")
+        if state.is_chance_node() or state.current_phase() == 0:
+            raise ValueError("Cannot step during incomplete deal phase (chance node)")
+
+        current_player = state.current_player()
+        if current_player != int(self.seat):
+            raise ValueError(
+                f"Baseline bot seat {self.seat.name} ({int(self.seat)}) called on "
+                f"seat {current_player}'s turn"
+            )
+
         legal = state.legal_actions()
         if not legal:
             raise ValueError("No legal actions available")
@@ -133,7 +143,17 @@ class DuplicateMatchRunner:
 
         while not state.is_terminal():
             acting_seat = Seat(state.current_player())
-            action = seats[acting_seat].step(state)
+            legal_actions = state.legal_actions()
+            action = seats[acting_seat].step(state.clone())
+            if (
+                isinstance(action, bool)
+                or not isinstance(action, int)
+                or action not in legal_actions
+            ):
+                raise ValueError(
+                    f"Illegal action {action!r} returned by {acting_seat.name}; "
+                    f"legal actions: {legal_actions}"
+                )
             state.apply_action(action)
 
         return float(state.returns()[int(Seat.NORTH)])

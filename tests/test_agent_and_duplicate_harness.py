@@ -574,3 +574,121 @@ def test_duplicate_match_runner_plays_open_and_closed_rooms_without_memory_leaka
     # On Board 1: Open Room Team A (North) opens 1NT (non-zero DD score), Closed Room passes out (0.0)
     assert dd_summary.boards[0].open_room_ns_score != 0.0
     assert dd_summary.boards[0].closed_room_ns_score == 0.0
+
+
+def test_duplicate_runner_clones_state_and_rejects_illegal_or_bool_bot_actions():
+    runner = DuplicateMatchRunner(tournament_seed=42, use_double_dummy_result=False)
+
+    # 1. Custom bot mutating its input `state` via `state.apply_action(...)` inside `step()`
+    #    must NOT corrupt the live room state!
+    class StateMutatingBot:
+        def __init__(self, seat: Seat) -> None:
+            self.seat = seat
+
+        def reset_for_board(self) -> None:
+            return None
+
+        def step(self, state: pyspiel.State) -> int:
+            chosen = PASS_ACTION if PASS_ACTION in state.legal_actions() else state.legal_actions()[0]
+            # Mutate the passed-in state all the way to terminal!
+            while not state.is_terminal():
+                state.apply_action(state.legal_actions()[0])
+            return chosen
+
+    mut_summary = runner.play_match(StateMutatingBot, FirstLegalPassBaselineBot, num_boards=1)
+    assert len(mut_summary.boards) == 1
+    assert mut_summary.boards[0].open_room_ns_score == 0.0
+    assert mut_summary.boards[0].closed_room_ns_score == 0.0
+
+    # 2. Custom bot returning bool (`True` == 1 in Python!), illegal revoke card, or out-of-range `999`
+    #    must raise `ValueError` BEFORE calling OpenSpiel C++ `apply_action`!
+    class BoolReturningBot:
+        def __init__(self, seat: Seat) -> None:
+            self.seat = seat
+
+        def reset_for_board(self) -> None:
+            return None
+
+        def step(self, state: pyspiel.State) -> int:
+            return True  # type: ignore[return-value]
+
+    with pytest.raises(ValueError, match="Illegal action"):
+        runner.play_match(BoolReturningBot, FirstLegalPassBaselineBot, num_boards=1)
+
+    # Illegal card play / revoke during auction or play (e.g. card 0 during auction, or non-held card in play)
+    class RevokeBot:
+        def __init__(self, seat: Seat) -> None:
+            self.seat = seat
+
+        def reset_for_board(self) -> None:
+            return None
+
+        def step(self, state: pyspiel.State) -> int:
+            if state.current_phase() == 1:
+                if len(state.full_history()) == 52:
+                    return 59  # Open 1NT so we enter play phase
+                return PASS_ACTION
+            # In play phase, return a card NOT in legal_actions() (suit revoke / unheld card)
+            legal_set = set(state.legal_actions())
+            illegal_card = next(c for c in range(52) if c not in legal_set)
+            return illegal_card
+
+    with pytest.raises(ValueError, match="Illegal action"):
+        runner.play_match(RevokeBot, FirstLegalPassBaselineBot, num_boards=1)
+
+    # Out-of-range action `999`: wrap _new_dealt_board_state so even in RED phase C++ cannot SIGABRT
+    class SafeStateProxy:
+        def __init__(self, inner: pyspiel.State) -> None:
+            self._inner = inner
+
+        def clone(self) -> SafeStateProxy:
+            return SafeStateProxy(self._inner.clone())
+
+        def apply_action(self, action: int) -> None:
+            if isinstance(action, bool) or not isinstance(action, int) or not (0 <= action <= 89):
+                raise RuntimeError(f"C++ DoApplyAction reached with unsafe action {action!r}")
+            self._inner.apply_action(action)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._inner, name)
+
+    class OutOfRangeBot:
+        def __init__(self, seat: Seat) -> None:
+            self.seat = seat
+
+        def reset_for_board(self) -> None:
+            return None
+
+        def step(self, state: pyspiel.State) -> int:
+            return 999
+
+    safe_state = SafeStateProxy(runner._new_dealt_board_state(1))
+    seats = {
+        Seat.NORTH: OutOfRangeBot(Seat.NORTH),
+        Seat.SOUTH: FirstLegalPassBaselineBot(Seat.SOUTH),
+        Seat.EAST: FirstLegalPassBaselineBot(Seat.EAST),
+        Seat.WEST: FirstLegalPassBaselineBot(Seat.WEST),
+    }
+    with pytest.raises(ValueError, match="Illegal action"):
+        runner._play_room(safe_state, seats)  # type: ignore[arg-type]
+
+
+def test_first_legal_pass_baseline_bot_rejects_wrong_seat_terminal_and_undealt_states():
+    game = pyspiel.load_game("bridge(use_double_dummy_result=false)")
+    undealt = game.new_initial_state()
+    dealt = game.new_initial_state(tournament_seed=42, board_number=1)
+
+    south_bot = FirstLegalPassBaselineBot(Seat.SOUTH)
+    with pytest.raises(ValueError, match="seat|turn|player"):
+        south_bot.step(dealt)
+
+    north_bot = FirstLegalPassBaselineBot(Seat.NORTH)
+    with pytest.raises(ValueError, match="deal|chance|phase"):
+        north_bot.step(undealt)
+
+    terminal = game.new_initial_state(tournament_seed=42, board_number=1)
+    for _ in range(4):
+        terminal.apply_action(PASS_ACTION)
+    with pytest.raises(ValueError, match="terminal"):
+        north_bot.step(terminal)
+
