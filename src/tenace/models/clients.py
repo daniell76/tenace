@@ -86,7 +86,7 @@ class VertexGeminiClient:
         self,
         project: str | None = None,
         location: str = "global",
-        model: str = "gemini-2.5-pro",
+        model: str = "gemini-4-argon",
         temperature: float = 0.2,
         genai_client: Any | None = None,
     ) -> None:

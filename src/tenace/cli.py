@@ -35,7 +35,7 @@ from tenace.models.clients import (
 T = TypeVar("T", bound=BaseModel)
 
 DEFAULT_GCP_PROJECT = "your-gcp-project-id"
-DEFAULT_STRATEGIST_MODEL = "gemini-2.5-pro"
+DEFAULT_STRATEGIST_MODEL = "gemini-4-argon"
 DEFAULT_DIFFUSION_MODEL = "publishers/google/models/diffusiongemma-26b-a4b-it"
 DEFAULT_GEMINI_EVALUATOR_MODEL = "gemini-2.5-flash"
 

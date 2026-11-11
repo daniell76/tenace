@@ -218,11 +218,11 @@ def test_vertex_gemini_client_parses_structured_response():
 
     fake_genai = SimpleNamespace(models=FakeModels())
     client = VertexGeminiClient(
-        model="gemini-2.5-pro",
         temperature=0.15,
         genai_client=fake_genai,
     )
     assert isinstance(client, StructuredModelClient)
+    assert client.model == "gemini-4-argon"
 
     result = client.generate_structured(
         system_prompt="You are a Bridge strategist.",
@@ -233,7 +233,7 @@ def test_vertex_gemini_client_parses_structured_response():
     assert result.phase == "auction"
     assert result.plan_summary == "Investigate 4-4 heart fit"
     assert result.revision == 1
-    assert captured["model"] == "gemini-2.5-pro"
+    assert captured["model"] == "gemini-4-argon"
     assert captured["contents"] == "North opened 1C, East passed."
     assert captured["config"].system_instruction == "You are a Bridge strategist."
     assert captured["config"].temperature == pytest.approx(0.15)

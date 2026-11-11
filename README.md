@@ -1,6 +1,6 @@
 # Tenace: 3-Layer Neuro-Symbolic Contract Bridge AI
 
-**Tenace** is a fair-play, three-layer neuro-symbolic Contract Bridge agent built on [OpenSpiel](https://github.com/google-deepmind/open_spiel) (`bridge`), **Vertex AI Gemini 2.5 Pro** (event-driven strategic planning), and **DiffusionGemma** (parallel denoising tactical option evaluation), grounded by constrained double-dummy infostate rollouts and an anti-blunder gate.
+**Tenace** is a fair-play, three-layer neuro-symbolic Contract Bridge agent built on [OpenSpiel](https://github.com/google-deepmind/open_spiel) (`bridge`), **Vertex AI Gemini 4 Argon** (`gemini-4-argon`, event-driven strategic planning), and **DiffusionGemma** (parallel denoising tactical option evaluation), grounded by constrained double-dummy infostate rollouts and an anti-blunder gate.
 
 ## Architecture
 
@@ -13,7 +13,7 @@ Layer 3 — Symbolic Rule Fact Tracker & Action Collapser (`tenace.layer3_rules`
    ├── Collapses contiguous/bridged rank-equivalent cards (0-API Fast Path if 1 candidate!)
    │
    ▼
-Layer 1 — Event-Driven Strategist (`tenace.layer1_strategist`, Gemini 2.5 Pro)
+Layer 1 — Event-Driven Strategist (`tenace.layer1_strategist`, Gemini 4 Argon)
    ├── Runs ONLY on board start, phase transition, dummy reveal, surprise void, or Layer-2 interrupt
    ├── Produces structured `StrategyState` (plan, assumptions, hard seat HCP/suit-length constraints)
    │
@@ -59,12 +59,12 @@ Run the full 3-layer neuro-symbolic pipeline locally without network credentials
 uv run tenace-match --mode mock --boards 2 --dds-worlds 8
 ```
 
-### 2. Live Vertex AI Match (Gemini 2.5 Pro + DiffusionGemma)
+### 2. Live Vertex AI Match (Gemini 4 Argon + DiffusionGemma)
 
 Authenticate with Google Cloud Application Default Credentials (`gcloud auth application-default login`) and run against live Vertex AI models:
 
 ```bash
-# Default: Layer-1 Gemini 2.5 Pro (global) + Layer-2 DiffusionGemma (us-central1)
+# Default: Layer-1 Gemini 4 Argon (gemini-4-argon, global) + Layer-2 DiffusionGemma (us-central1)
 uv run tenace-match --project your-gcp-project-id --boards 4
 
 # Optional dedicated Vertex AI Endpoint ID for DiffusionGemma:
@@ -112,11 +112,11 @@ from tenace.layer3_rules import RuleDDSEvaluator
 
 PROJECT_ID = "your-gcp-project-id"
 
-# Layer 1: Event-driven strategic planner (Gemini 2.5 Pro on Vertex AI)
+# Layer 1: Event-driven strategic planner (Gemini 4 Argon on Vertex AI)
 strategist_client = VertexGeminiClient(
     project=PROJECT_ID,
     location="global",
-    model="gemini-2.5-pro",
+    model="gemini-4-argon",
     temperature=0.2,
 )
 

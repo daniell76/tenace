@@ -396,7 +396,7 @@ def test_cli_parser_defaults_to_vertex_and_gcp_env(monkeypatch):
     assert args.mode == "vertex"
     assert args.project == "my-bridge-gcp-proj"
     assert args.strategist_location == "global"
-    assert args.strategist_model == "gemini-2.5-pro"
+    assert args.strategist_model == "gemini-4-argon"
     assert args.evaluator_backend == "diffusion-gemma"
     assert args.evaluator_location == "us-central1"
     assert args.evaluator_model == "publishers/google/models/diffusiongemma-26b-a4b-it"
@@ -492,7 +492,7 @@ def test_cli_vertex_mode_wires_gemini_and_diffusion_gemma_clients(monkeypatch):
     assert rc2 == 0
     assert len(diffusion_inits) == 0
     assert len(gemini_inits) == 2
-    assert gemini_inits[0]["model"] == "gemini-2.5-pro"
+    assert gemini_inits[0]["model"] == "gemini-4-argon"
     assert gemini_inits[1] == {
         "project": "proj-beta",
         "location": "global",
