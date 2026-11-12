@@ -1,0 +1,10 @@
+project_id          = "your-gcp-project-id"
+region              = "us-central1"
+container_image     = "us-central1-docker.pkg.dev/your-gcp-project-id/tenace/tenace:latest"
+strategist_model    = "gemini-4-argon"
+strategist_location = "global"
+evaluator_backend   = "decisions"
+evaluator_model     = "gemini-decision-1"
+evaluator_location  = "global"
+max_instance_count  = 10
+deletion_protection = true

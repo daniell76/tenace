@@ -3,3 +3,15 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 uv.lock
+terraform/local/
+**/.terraform/
+**/.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+!*.tfvars.example
+*.tfbackend
+!*.tfbackend.example
+crash.log
+crash.*.log

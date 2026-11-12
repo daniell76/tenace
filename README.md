@@ -144,6 +144,86 @@ uv run tenace-match \
   --boards 4
 ```
 
+## Cloud Run Service (`tenace-serve`), Batch Job & Multi-Environment Terraform IaC
+
+Tenace packages both the stateless FastAPI HTTP service (`tenace-serve`) and the batch benchmark CLI (`tenace-match`) into a single non-root container (`Dockerfile`) managed across `bootstrap`, `dev`, and `prod` environments via Terraform (`terraform/`).
+
+### Local HTTP Server Quickstart
+
+```bash
+# Start locally in offline mock mode on 0.0.0.0:8080:
+TENACE_MODE=mock uv run tenace-serve
+```
+
+### Stateless HTTP API Endpoints
+
+- `GET /healthz`: Readiness/liveness check returning service version, execution mode, `dds_worlds`, and active default `ModelProfile`.
+- `POST /v1/step`: Selects the next legal bid or card for a single seat using either imperfect-information hands (`own_hand` + optional post-lead `dummy_hand` + `action_history`) or a deterministic benchmark board (`tournament_seed` + `board_number` + `action_history`). Accepts and returns `StrategyState` (`prior_strategy` -> `strategy`) so horizontally autoscaled Cloud Run instances preserve Layer-1 Strategist caching across turns with zero sticky state.
+- `POST /v1/match`: Runs a synchronous two-room WBF Duplicate IMP match (`baseline` or head-to-head `tenace` model comparison) and returns structured IMP results, telemetry, and scorecard text.
+
+### Deploying to Cloud Run (`bootstrap` -> `dev` -> `prod`)
+
+Environment-specific `.tfvars` and GCS `.tfbackend` files are stored locally under `terraform/local/` (gitignored so real GCP project IDs and state buckets are never committed). See [`terraform/README.md`](terraform/README.md) for the complete layout and options:
+
+```bash
+# 1. Copy example templates into gitignored terraform/local/ and set your GCP project ID:
+mkdir -p terraform/local/{bootstrap,dev,prod}
+cp terraform/bootstrap/terraform.tfvars.example terraform/local/bootstrap/terraform.tfvars
+cp terraform/environments/dev/backend.tfbackend.example terraform/local/dev/backend.tfbackend
+cp terraform/environments/dev/terraform.tfvars.example terraform/local/dev/terraform.tfvars
+cp terraform/environments/prod/backend.tfbackend.example terraform/local/prod/backend.tfbackend
+cp terraform/environments/prod/terraform.tfvars.example terraform/local/prod/terraform.tfvars
+
+# 2. Bootstrap GCP APIs, versioned GCS remote state bucket & Artifact Registry:
+terraform -chdir=terraform/bootstrap init
+terraform -chdir=terraform/bootstrap apply -var-file=../local/bootstrap/terraform.tfvars
+
+# 3. Build and push the container image via Cloud Build:
+gcloud builds submit \
+  --project your-gcp-project-id \
+  --tag us-central1-docker.pkg.dev/your-gcp-project-id/tenace/tenace:latest \
+  .
+
+# 4. Deploy dev (and similarly prod) backed by GCS remote state:
+terraform -chdir=terraform/environments/dev init \
+  -backend-config=../../local/dev/backend.tfbackend
+terraform -chdir=terraform/environments/dev apply \
+  -var-file=../../local/dev/terraform.tfvars
+```
+
+### Calling the Deployed Cloud Run Service & Benchmark Job
+
+```bash
+SERVICE_URL="$(terraform -chdir=terraform/environments/dev output -raw service_uri)"
+AUTH_HEADER="Authorization: Bearer $(gcloud auth print-identity-token)"
+
+# Readiness & active ModelProfile
+curl -sS -H "${AUTH_HEADER}" "${SERVICE_URL}/healthz"
+
+# Single-seat imperfect-information bid/play decision
+curl -sS -X POST "${SERVICE_URL}/v1/step" \
+  -H "${AUTH_HEADER}" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "seat": "NORTH",
+    "board_number": 1,
+    "own_hand": ["S:A","S:K","S:Q","H:A","H:K","D:A","D:Q","D:J","C:K","C:Q","C:5","C:3","C:2"],
+    "action_history": []
+  }'
+
+# Synchronous duplicate match
+curl -sS -X POST "${SERVICE_URL}/v1/match" \
+  -H "${AUTH_HEADER}" \
+  -H "Content-Type: application/json" \
+  -d '{"boards": 2, "seed": 42, "dds_worlds": 8, "opponent": "baseline"}'
+
+# Long-running batch WBF Duplicate IMP benchmark via Cloud Run Job
+gcloud run jobs execute tenace-bench-dev \
+  --project your-gcp-project-id \
+  --region us-central1 \
+  --wait
+```
+
 ## Python API Quickstart
 
 You can also wire `TenaceAgent` and `DuplicateMatchRunner` directly in Python:

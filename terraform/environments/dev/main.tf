@@ -1,0 +1,35 @@
+module "tenace" {
+  source = "../../modules/tenace_cloudrun"
+
+  project_id                       = var.project_id
+  environment                      = "dev"
+  region                           = var.region
+  service_name_prefix              = var.service_name_prefix
+  container_image                  = var.container_image
+  tenace_mode                      = var.tenace_mode
+  strategist_model                 = var.strategist_model
+  strategist_location              = var.strategist_location
+  evaluator_backend                = var.evaluator_backend
+  evaluator_model                  = var.evaluator_model
+  evaluator_location               = var.evaluator_location
+  evaluator_endpoint_id            = var.evaluator_endpoint_id
+  decisions_auth                   = var.decisions_auth
+  decisions_violation_threshold    = var.decisions_violation_threshold
+  gemini_api_key_secret_id         = var.gemini_api_key_secret_id
+  dds_worlds                       = var.dds_worlds
+  service_cpu                      = var.service_cpu
+  service_memory                   = var.service_memory
+  min_instance_count               = var.min_instance_count
+  max_instance_count               = var.max_instance_count
+  max_instance_request_concurrency = var.max_instance_request_concurrency
+  request_timeout_seconds          = var.request_timeout_seconds
+  allow_unauthenticated            = var.allow_unauthenticated
+  deletion_protection              = var.deletion_protection
+  enable_benchmark_job             = var.enable_benchmark_job
+  job_cpu                          = var.job_cpu
+  job_memory                       = var.job_memory
+  job_timeout_seconds              = var.job_timeout_seconds
+  job_max_retries                  = var.job_max_retries
+  job_args                         = var.job_args
+  labels                           = var.labels
+}
