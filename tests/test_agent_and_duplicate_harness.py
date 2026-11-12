@@ -859,7 +859,7 @@ def test_duplicate_runner_records_room_transcripts_strategy_history_and_closes_b
     assert "WEST" in board.closed_room.strategy_traces
     assert "NORTH" not in board.closed_room.strategy_traces
 
-    # Telemetry sums across all 8 bots
+    # Telemetry sums across all 8 bots + per-team breakdown
     expected_forced = sum(a.forced_moves for a in created_tenace)
     expected_strat = sum(a.strategist_calls for a in created_tenace)
     expected_eval = sum(a.evaluator_calls for a in created_tenace)
@@ -867,6 +867,12 @@ def test_duplicate_runner_records_room_transcripts_strategy_history_and_closes_b
         "forced_moves": expected_forced,
         "strategist_calls": expected_strat,
         "evaluator_calls": expected_eval,
+        "team_a_forced_moves": expected_forced,
+        "team_a_strategist_calls": expected_strat,
+        "team_a_evaluator_calls": expected_eval,
+        "team_b_forced_moves": 0,
+        "team_b_strategist_calls": 0,
+        "team_b_evaluator_calls": 0,
     }
     assert summary.telemetry["strategist_calls"] >= 4
     assert summary.telemetry["evaluator_calls"] >= 4
@@ -978,6 +984,137 @@ def test_duplicate_runner_board2_non_north_dealer_supports_infostate_resampling(
     rng = random.Random(123)
     resampled = state.resample_from_infostate(int(Seat.SOUTH), rng.random)
     assert resampled.current_player() == int(Seat.SOUTH)
+
+
+def test_duplicate_runner_records_per_team_telemetry_in_head_to_head_match():
+    import re
+
+    class TeamStrategistClient:
+        def __init__(self, team_tag: str, seat: Seat) -> None:
+            self.team_tag = team_tag
+            self.seat = seat
+            self.calls = 0
+
+        def generate_structured(
+            self,
+            system_prompt: str,
+            user_prompt: str,
+            schema: type[T],
+        ) -> T:
+            self.calls += 1
+            phase = "play" if "Phase: play" in user_prompt else "auction"
+            resp = StrategyState(
+                phase=phase,  # type: ignore[arg-type]
+                plan_summary=f"{self.team_tag}:{self.seat.name} {phase} #{self.calls}",
+                assumptions=[Assumption(claim="Balanced tempo", confidence=0.7)],
+            )
+            assert isinstance(resp, schema)
+            return resp
+
+    class TeamEvaluatorClient:
+        def __init__(self, team_tag: str, seat: Seat) -> None:
+            self.team_tag = team_tag
+            self.seat = seat
+            self._interrupted = False
+
+        def generate_structured(
+            self,
+            system_prompt: str,
+            user_prompt: str,
+            schema: type[T],
+        ) -> T:
+            labels = re.findall(r"^- ([^:]+): baseline_ev=", user_prompt, flags=re.MULTILINE)
+            # Trigger an extra interrupt ONLY for Team A North in auction so Team A and Team B
+            # have distinct non-zero call totals across rooms!
+            if (
+                self.team_tag == "A"
+                and self.seat == Seat.NORTH
+                and "Phase: auction" in user_prompt
+                and "1NT" in labels
+            ):
+                if not self._interrupted:
+                    self._interrupted = True
+                    resp = TacticalDecision(
+                        assumption_violated=True,
+                        violation_reason="Team A extra replan check",
+                        option_scores={"1NT": 1.0, "Pass": 0.1},
+                        rationale="Interrupt once then bid 1NT",
+                    )
+                else:
+                    resp = TacticalDecision(
+                        assumption_violated=False,
+                        option_scores={"1NT": 1.0, "Pass": 0.1},
+                        rationale="Open 1NT",
+                    )
+            elif "Phase: auction" in user_prompt and "Pass" in labels:
+                resp = TacticalDecision(
+                    assumption_violated=False,
+                    option_scores={"Pass": 1.0},
+                    rationale="Pass",
+                )
+            else:
+                scores = {labels[0]: 1.0} if labels else {}
+                resp = TacticalDecision(
+                    assumption_violated=False,
+                    option_scores=scores,
+                    rationale="Top card",
+                )
+            assert isinstance(resp, schema)
+            return resp
+
+    created_team_a: list[TenaceAgent] = []
+    created_team_b: list[TenaceAgent] = []
+
+    def make_team_a(seat: Seat) -> TenaceAgent:
+        bot = TenaceAgent(
+            seat=seat,
+            strategist_client=TeamStrategistClient("A", seat),
+            evaluator_client=TeamEvaluatorClient("A", seat),
+            dds_evaluator=RuleDDSEvaluator(num_worlds=1, max_make_prob_drop=1.0, rng_seed=31 + int(seat)),
+        )
+        created_team_a.append(bot)
+        return bot
+
+    def make_team_b(seat: Seat) -> TenaceAgent:
+        bot = TenaceAgent(
+            seat=seat,
+            strategist_client=TeamStrategistClient("B", seat),
+            evaluator_client=TeamEvaluatorClient("B", seat),
+            dds_evaluator=RuleDDSEvaluator(num_worlds=1, max_make_prob_drop=1.0, rng_seed=137 + int(seat)),
+        )
+        created_team_b.append(bot)
+        return bot
+
+    runner = DuplicateMatchRunner(tournament_seed=42, use_double_dummy_result=False)
+    summary = runner.play_match(make_team_a, make_team_b, num_boards=1)
+
+    assert len(created_team_a) == 4
+    assert len(created_team_b) == 4
+
+    exp_a_forced = sum(b.forced_moves for b in created_team_a)
+    exp_a_strat = sum(b.strategist_calls for b in created_team_a)
+    exp_a_eval = sum(b.evaluator_calls for b in created_team_a)
+
+    exp_b_forced = sum(b.forced_moves for b in created_team_b)
+    exp_b_strat = sum(b.strategist_calls for b in created_team_b)
+    exp_b_eval = sum(b.evaluator_calls for b in created_team_b)
+
+    assert exp_a_strat > 0 and exp_b_strat > 0
+    assert exp_a_strat != exp_b_strat
+    assert exp_a_eval != exp_b_eval
+
+    assert summary.telemetry == {
+        "forced_moves": exp_a_forced + exp_b_forced,
+        "strategist_calls": exp_a_strat + exp_b_strat,
+        "evaluator_calls": exp_a_eval + exp_b_eval,
+        "team_a_forced_moves": exp_a_forced,
+        "team_a_strategist_calls": exp_a_strat,
+        "team_a_evaluator_calls": exp_a_eval,
+        "team_b_forced_moves": exp_b_forced,
+        "team_b_strategist_calls": exp_b_strat,
+        "team_b_evaluator_calls": exp_b_eval,
+    }
+
 
 
 

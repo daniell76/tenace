@@ -4,9 +4,9 @@ import argparse
 import math
 import os
 import re
-from typing import TypeVar
+from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from tenace.agent import TenaceAgent
 from tenace.domain.types import (
@@ -28,6 +28,7 @@ from tenace.layer1_strategist import SAYC_CONVENTION_CARD
 from tenace.layer3_rules import RuleDDSEvaluator
 from tenace.models.clients import (
     DiffusionGemmaClient,
+    GeminiDecisionsClient,
     StructuredModelClient,
     VertexGeminiClient,
 )
@@ -36,8 +37,11 @@ T = TypeVar("T", bound=BaseModel)
 
 DEFAULT_GCP_PROJECT = "your-gcp-project-id"
 DEFAULT_STRATEGIST_MODEL = "gemini-4-argon"
+DEFAULT_DECISIONS_MODEL = "gemini-decision-1"
 DEFAULT_DIFFUSION_MODEL = "publishers/google/models/diffusiongemma-26b-a4b-it"
 DEFAULT_GEMINI_EVALUATOR_MODEL = "gemini-2.5-flash"
+
+_PUBLISHER_PREFIX = "publishers/google/models/"
 
 _HCP_RE = re.compile(r"Own Hand\s*\((\d+)\s*HCP\)", re.IGNORECASE)
 _PHASE_RE = re.compile(r"Phase:\s*(auction|play)\b", re.IGNORECASE)
@@ -48,12 +52,94 @@ _CANDIDATE_LINE_RE = re.compile(
 )
 
 __all__ = [
+    "DEFAULT_DECISIONS_MODEL",
+    "DEFAULT_DIFFUSION_MODEL",
+    "DEFAULT_GCP_PROJECT",
+    "DEFAULT_GEMINI_EVALUATOR_MODEL",
+    "DEFAULT_STRATEGIST_MODEL",
     "HeuristicMockModelClient",
+    "ModelProfile",
     "build_arg_parser",
+    "build_clients_for_profile",
     "format_match_report",
     "main",
+    "resolve_model_profiles",
     "run_cli",
 ]
+
+
+def _default_evaluator_location(backend: str) -> str:
+    return "us-central1" if backend == "diffusion-gemma" else "global"
+
+
+def _default_evaluator_model(backend: str) -> str:
+    if backend == "decisions":
+        return DEFAULT_DECISIONS_MODEL
+    if backend == "diffusion-gemma":
+        return DEFAULT_DIFFUSION_MODEL
+    if backend == "gemini":
+        return DEFAULT_GEMINI_EVALUATOR_MODEL
+    raise ValueError(f"Unsupported evaluator_backend: {backend!r}")
+
+
+def _validate_violation_threshold(value: Any, *, flag_name: str = "decisions_violation_threshold") -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or not (0.0 < value < 1.0)
+    ):
+        raise ValueError(
+            f"{flag_name} must be a finite number strictly between 0.0 and 1.0, got {value!r}"
+        )
+    return float(value)
+
+
+class ModelProfile(BaseModel):
+    """Configurable Layer-1 Strategist and Layer-2 Tactical Evaluator profile for a team."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["vertex", "mock"] = "vertex"
+    project: str | None = DEFAULT_GCP_PROJECT
+    strategist_location: str = "global"
+    strategist_model: str = DEFAULT_STRATEGIST_MODEL
+    evaluator_backend: Literal["decisions", "diffusion-gemma", "gemini"] = "decisions"
+    evaluator_location: str = "global"
+    evaluator_model: str = DEFAULT_DECISIONS_MODEL
+    evaluator_endpoint_id: str | None = None
+    decisions_auth: Literal["vertex", "api-key"] = "vertex"
+    decisions_violation_threshold: float = 0.70
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_backend_defaults(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        resolved = dict(data)
+        backend = resolved.get("evaluator_backend") or "decisions"
+        if backend in ("decisions", "diffusion-gemma", "gemini"):
+            if resolved.get("evaluator_location") is None:
+                resolved["evaluator_location"] = _default_evaluator_location(backend)
+            if resolved.get("evaluator_model") is None:
+                resolved["evaluator_model"] = _default_evaluator_model(backend)
+        return resolved
+
+    @field_validator("decisions_violation_threshold")
+    @classmethod
+    def _check_threshold(cls, value: float) -> float:
+        return _validate_violation_threshold(value)
+
+    def _short_eval_model(self) -> str:
+        if self.evaluator_model.startswith(_PUBLISHER_PREFIX):
+            return self.evaluator_model[len(_PUBLISHER_PREFIX) :]
+        return self.evaluator_model
+
+    def short_label(self) -> str:
+        core = f"L1:{self.strategist_model} | L2:{self.evaluator_backend}/{self._short_eval_model()}"
+        if self.mode == "mock":
+            return f"mock | {core}"
+        return core
 
 
 class HeuristicMockModelClient:
@@ -224,22 +310,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--evaluator-backend",
-        choices=["diffusion-gemma", "gemini"],
-        default="diffusion-gemma",
-        help="Layer-2 Evaluator backend ('diffusion-gemma' or 'gemini').",
+        choices=["decisions", "diffusion-gemma", "gemini"],
+        default="decisions",
+        help=(
+            "Layer-2 Evaluator backend: 'decisions' (default, zero-output-token Gemini Decisions API), "
+            "'diffusion-gemma', or 'gemini'."
+        ),
     )
     parser.add_argument(
         "--evaluator-location",
-        default="us-central1",
-        help="Vertex AI region for Layer-2 Evaluator (default: us-central1).",
+        default=None,
+        help=(
+            "Vertex AI region for Layer-2 Evaluator (auto-resolves to 'global' for decisions/gemini "
+            "and 'us-central1' for diffusion-gemma when omitted)."
+        ),
     )
     parser.add_argument(
         "--evaluator-model",
-        default=DEFAULT_DIFFUSION_MODEL,
+        default=None,
         help=(
-            "Model identifier for Layer-2 Evaluator (defaults to DiffusionGemma MaaS "
-            f"'{DEFAULT_DIFFUSION_MODEL}', or '{DEFAULT_GEMINI_EVALUATOR_MODEL}' when "
-            "--evaluator-backend=gemini is used without overriding --evaluator-model)."
+            "Model identifier for Layer-2 Evaluator (auto-resolves per backend: "
+            f"'{DEFAULT_DECISIONS_MODEL}' for decisions, "
+            f"'{DEFAULT_DIFFUSION_MODEL}' for diffusion-gemma, or "
+            f"'{DEFAULT_GEMINI_EVALUATOR_MODEL}' for gemini when omitted)."
         ),
     )
     parser.add_argument(
@@ -248,10 +341,31 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Optional dedicated Vertex AI Endpoint ID for DiffusionGemma.",
     )
     parser.add_argument(
+        "--decisions-auth",
+        choices=["vertex", "api-key"],
+        default="vertex",
+        help=(
+            "Authentication mode for --evaluator-backend decisions: 'vertex' (default) or "
+            "'api-key' (Gemini API v1beta via $GEMINI_API_KEY / $GOOGLE_API_KEY)."
+        ),
+    )
+    parser.add_argument(
+        "--decisions-violation-threshold",
+        type=float,
+        default=0.70,
+        help=(
+            "Probability threshold in (0.0, 1.0) on NoulQuestion P(true) to trigger a "
+            "Layer-1 assumption-violation interrupt (default: 0.70)."
+        ),
+    )
+    parser.add_argument(
         "--opponent",
-        choices=["baseline", "bluechip"],
+        choices=["baseline", "bluechip", "tenace"],
         default="baseline",
-        help="Opponent team engine: 'baseline' or external BlueChip v18 bot ('bluechip').",
+        help=(
+            "Opponent team engine: 'baseline', external BlueChip v18 bot ('bluechip'), "
+            "or head-to-head Tenace model comparison ('tenace')."
+        ),
     )
     parser.add_argument(
         "--bluechip-cmd",
@@ -266,6 +380,49 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=60.0,
         help="Socket/handshake timeout in seconds for BlueChip subprocesses (default: 60.0).",
+    )
+    parser.add_argument(
+        "--opponent-strategist-location",
+        default=None,
+        help="Override Layer-1 Strategist Vertex AI region for Team B (--opponent tenace).",
+    )
+    parser.add_argument(
+        "--opponent-strategist-model",
+        default=None,
+        help="Override Layer-1 Strategist model name for Team B (--opponent tenace).",
+    )
+    parser.add_argument(
+        "--opponent-evaluator-backend",
+        choices=["decisions", "diffusion-gemma", "gemini"],
+        default=None,
+        help="Override Layer-2 Evaluator backend for Team B (--opponent tenace).",
+    )
+    parser.add_argument(
+        "--opponent-evaluator-location",
+        default=None,
+        help="Override Layer-2 Evaluator Vertex AI region for Team B (--opponent tenace).",
+    )
+    parser.add_argument(
+        "--opponent-evaluator-model",
+        default=None,
+        help="Override Layer-2 Evaluator model identifier for Team B (--opponent tenace).",
+    )
+    parser.add_argument(
+        "--opponent-evaluator-endpoint-id",
+        default=None,
+        help="Override DiffusionGemma Vertex AI Endpoint ID for Team B (--opponent tenace).",
+    )
+    parser.add_argument(
+        "--opponent-decisions-auth",
+        choices=["vertex", "api-key"],
+        default=None,
+        help="Override Decisions API auth mode ('vertex' or 'api-key') for Team B (--opponent tenace).",
+    )
+    parser.add_argument(
+        "--opponent-decisions-violation-threshold",
+        type=float,
+        default=None,
+        help="Override Decisions API violation threshold in (0.0, 1.0) for Team B (--opponent tenace).",
     )
     parser.add_argument(
         "--boards",
@@ -292,6 +449,141 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Skip card play and score auction contracts directly via OpenSpiel double-dummy.",
     )
     return parser
+
+
+def resolve_model_profiles(
+    args: argparse.Namespace,
+) -> tuple[ModelProfile, ModelProfile | None]:
+    _validate_violation_threshold(
+        args.decisions_violation_threshold,
+        flag_name="--decisions-violation-threshold",
+    )
+    if args.opponent_decisions_violation_threshold is not None:
+        _validate_violation_threshold(
+            args.opponent_decisions_violation_threshold,
+            flag_name="--opponent-decisions-violation-threshold",
+        )
+
+    team_a = ModelProfile(
+        mode=args.mode,
+        project=args.project,
+        strategist_location=args.strategist_location,
+        strategist_model=args.strategist_model,
+        evaluator_backend=args.evaluator_backend,
+        evaluator_location=args.evaluator_location,
+        evaluator_model=args.evaluator_model,
+        evaluator_endpoint_id=args.evaluator_endpoint_id,
+        decisions_auth=args.decisions_auth,
+        decisions_violation_threshold=args.decisions_violation_threshold,
+    )
+
+    if args.opponent != "tenace":
+        return team_a, None
+
+    opp_backend = (
+        args.opponent_evaluator_backend
+        if args.opponent_evaluator_backend is not None
+        else team_a.evaluator_backend
+    )
+    same_backend = opp_backend == team_a.evaluator_backend
+
+    opp_eval_location = (
+        args.opponent_evaluator_location
+        if args.opponent_evaluator_location is not None
+        else (team_a.evaluator_location if same_backend else None)
+    )
+    opp_eval_model = (
+        args.opponent_evaluator_model
+        if args.opponent_evaluator_model is not None
+        else (team_a.evaluator_model if same_backend else None)
+    )
+    opp_eval_endpoint_id = (
+        args.opponent_evaluator_endpoint_id
+        if args.opponent_evaluator_endpoint_id is not None
+        else (team_a.evaluator_endpoint_id if same_backend else None)
+    )
+
+    team_b = ModelProfile(
+        mode=args.mode,
+        project=args.project,
+        strategist_location=(
+            args.opponent_strategist_location
+            if args.opponent_strategist_location is not None
+            else team_a.strategist_location
+        ),
+        strategist_model=(
+            args.opponent_strategist_model
+            if args.opponent_strategist_model is not None
+            else team_a.strategist_model
+        ),
+        evaluator_backend=opp_backend,
+        evaluator_location=opp_eval_location,
+        evaluator_model=opp_eval_model,
+        evaluator_endpoint_id=opp_eval_endpoint_id,
+        decisions_auth=(
+            args.opponent_decisions_auth
+            if args.opponent_decisions_auth is not None
+            else team_a.decisions_auth
+        ),
+        decisions_violation_threshold=(
+            args.opponent_decisions_violation_threshold
+            if args.opponent_decisions_violation_threshold is not None
+            else team_a.decisions_violation_threshold
+        ),
+    )
+    return team_a, team_b
+
+
+def build_clients_for_profile(
+    profile: ModelProfile,
+) -> tuple[StructuredModelClient, StructuredModelClient]:
+    _validate_violation_threshold(profile.decisions_violation_threshold)
+
+    if profile.mode == "mock":
+        return HeuristicMockModelClient(), HeuristicMockModelClient()
+
+    strategist_client: StructuredModelClient = VertexGeminiClient(
+        project=profile.project,
+        location=profile.strategist_location,
+        model=profile.strategist_model,
+    )
+
+    evaluator_client: StructuredModelClient
+    if profile.evaluator_backend == "decisions":
+        if profile.decisions_auth == "vertex":
+            evaluator_client = GeminiDecisionsClient(
+                project=profile.project,
+                location=profile.evaluator_location,
+                model=profile.evaluator_model,
+                vertexai=True,
+                violation_threshold=profile.decisions_violation_threshold,
+            )
+        else:
+            evaluator_client = GeminiDecisionsClient(
+                project=None,
+                location=profile.evaluator_location,
+                model=profile.evaluator_model,
+                vertexai=False,
+                violation_threshold=profile.decisions_violation_threshold,
+            )
+    elif profile.evaluator_backend == "diffusion-gemma":
+        evaluator_client = DiffusionGemmaClient(
+            project=profile.project,
+            location=profile.evaluator_location,
+            endpoint_id=profile.evaluator_endpoint_id,
+            maas_model_name=profile.evaluator_model,
+        )
+    elif profile.evaluator_backend == "gemini":
+        evaluator_client = VertexGeminiClient(
+            project=profile.project,
+            location=profile.evaluator_location,
+            model=profile.evaluator_model,
+            temperature=0.2,
+        )
+    else:
+        raise ValueError(f"Unsupported evaluator_backend: {profile.evaluator_backend!r}")
+
+    return strategist_client, evaluator_client
 
 
 def _format_room_section(
@@ -328,6 +620,8 @@ def format_match_report(
     summary: MatchSummary,
     team_a_name: str = "Tenace",
     team_b_name: str = "Opponent",
+    team_a_profile: str | None = None,
+    team_b_profile: str | None = None,
 ) -> str:
     ruler = "=" * 76
     sub_ruler = "-" * 76
@@ -335,9 +629,17 @@ def format_match_report(
         ruler,
         "TENACE DUPLICATE BRIDGE MATCH REPORT",
         f"Matchup : {team_a_name} vs {team_b_name}",
-        f"Boards  : {len(summary.boards)}  |  Tournament Seed: {summary.tournament_seed}",
-        ruler,
     ]
+    if team_a_profile is not None:
+        lines.append(f"Team A  : {team_a_name} ({team_a_profile})")
+    if team_b_profile is not None:
+        lines.append(f"Team B  : {team_b_name} ({team_b_profile})")
+    lines.extend(
+        [
+            f"Boards  : {len(summary.boards)}  |  Tournament Seed: {summary.tournament_seed}",
+            ruler,
+        ]
+    )
 
     for board in summary.boards:
         lines.append(f"Board {board.board_number}")
@@ -380,45 +682,28 @@ def format_match_report(
             f"  strategist_calls : {summary.telemetry.get('strategist_calls', 0)}",
             f"  evaluator_calls  : {summary.telemetry.get('evaluator_calls', 0)}",
             f"  forced_moves     : {summary.telemetry.get('forced_moves', 0)}",
-            ruler,
         ]
     )
-    return "\n".join(lines)
-
-
-def _build_model_clients(
-    args: argparse.Namespace,
-) -> tuple[StructuredModelClient, StructuredModelClient]:
-    if args.mode == "mock":
-        return HeuristicMockModelClient(), HeuristicMockModelClient()
-
-    strategist_client: StructuredModelClient = VertexGeminiClient(
-        project=args.project,
-        location=args.strategist_location,
-        model=args.strategist_model,
+    team_b_activity = (
+        summary.telemetry.get("team_b_strategist_calls", 0)
+        + summary.telemetry.get("team_b_evaluator_calls", 0)
+        + summary.telemetry.get("team_b_forced_moves", 0)
     )
-
-    if args.evaluator_backend == "diffusion-gemma":
-        evaluator_client: StructuredModelClient = DiffusionGemmaClient(
-            project=args.project,
-            location=args.evaluator_location,
-            endpoint_id=args.evaluator_endpoint_id,
-            maas_model_name=args.evaluator_model,
+    if "team_a_strategist_calls" in summary.telemetry and team_b_activity > 0:
+        lines.append(
+            f"  {team_a_name}: "
+            f"strategist_calls={summary.telemetry.get('team_a_strategist_calls', 0)}, "
+            f"evaluator_calls={summary.telemetry.get('team_a_evaluator_calls', 0)}, "
+            f"forced_moves={summary.telemetry.get('team_a_forced_moves', 0)}"
         )
-    else:
-        resolved_eval_model = (
-            DEFAULT_GEMINI_EVALUATOR_MODEL
-            if args.evaluator_model == DEFAULT_DIFFUSION_MODEL
-            else args.evaluator_model
+        lines.append(
+            f"  {team_b_name}: "
+            f"strategist_calls={summary.telemetry.get('team_b_strategist_calls', 0)}, "
+            f"evaluator_calls={summary.telemetry.get('team_b_evaluator_calls', 0)}, "
+            f"forced_moves={summary.telemetry.get('team_b_forced_moves', 0)}"
         )
-        evaluator_client = VertexGeminiClient(
-            project=args.project,
-            location=args.evaluator_location,
-            model=resolved_eval_model,
-            temperature=0.2,
-        )
-
-    return strategist_client, evaluator_client
+    lines.append(ruler)
+    return "\n".join(lines)
 
 
 def run_cli(argv: list[str] | None = None) -> int:
@@ -443,7 +728,8 @@ def run_cli(argv: list[str] | None = None) -> int:
                 "(BlueChip protocol v18 requires full card play)"
             )
 
-    strategist_client, evaluator_client = _build_model_clients(args)
+    team_a_profile, team_b_profile = resolve_model_profiles(args)
+    strategist_client, evaluator_client = build_clients_for_profile(team_a_profile)
 
     def team_a_factory(seat: Seat) -> BridgeSeatBot:
         return TenaceAgent(
@@ -457,7 +743,28 @@ def run_cli(argv: list[str] | None = None) -> int:
             convention_card=SAYC_CONVENTION_CARD,
         )
 
-    if args.opponent == "bluechip":
+    team_a_name = "Tenace"
+    team_b_profile_label: str | None = None
+
+    if args.opponent == "tenace":
+        assert team_b_profile is not None
+        team_a_name = "Tenace-A"
+        team_b_name = "Tenace-B"
+        team_b_profile_label = team_b_profile.short_label()
+        opp_strategist_client, opp_evaluator_client = build_clients_for_profile(team_b_profile)
+
+        def team_b_factory(seat: Seat) -> BridgeSeatBot:
+            return TenaceAgent(
+                seat=seat,
+                strategist_client=opp_strategist_client,
+                evaluator_client=opp_evaluator_client,
+                dds_evaluator=RuleDDSEvaluator(
+                    num_worlds=args.dds_worlds,
+                    rng_seed=(args.seed * 37) + int(seat) + 100,
+                ),
+                convention_card=SAYC_CONVENTION_CARD,
+            )
+    elif args.opponent == "bluechip":
         team_b_name = "BlueChip"
         cmd_template = args.bluechip_cmd
         timeout_secs = args.bluechip_timeout
@@ -486,7 +793,15 @@ def run_cli(argv: list[str] | None = None) -> int:
         team_b_factory=team_b_factory,
         num_boards=args.boards,
     )
-    print(format_match_report(summary, team_a_name="Tenace", team_b_name=team_b_name))
+    print(
+        format_match_report(
+            summary,
+            team_a_name=team_a_name,
+            team_b_name=team_b_name,
+            team_a_profile=team_a_profile.short_label(),
+            team_b_profile=team_b_profile_label,
+        )
+    )
     return 0
 
 

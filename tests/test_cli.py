@@ -8,9 +8,12 @@ import pytest
 
 from tenace.cli import (
     HeuristicMockModelClient,
+    ModelProfile,
     build_arg_parser,
+    build_clients_for_profile,
     format_match_report,
     main,
+    resolve_model_profiles,
     run_cli,
 )
 from tenace.domain.types import StrategyState, TacticalDecision
@@ -388,8 +391,71 @@ def test_format_match_report_imp_margin_winner_and_tie():
     report_tie = format_match_report(tie_summary, team_a_name="Tenace", team_b_name="Opponent")
     assert "Result: Exact Tie" in report_tie
 
+    # When Team B has 0 model telemetry, per-team telemetry lines are omitted
+    single_tenace = MatchSummary(
+        tournament_seed=42,
+        boards=[],
+        telemetry={
+            "strategist_calls": 4,
+            "evaluator_calls": 6,
+            "forced_moves": 2,
+            "team_a_strategist_calls": 4,
+            "team_a_evaluator_calls": 6,
+            "team_a_forced_moves": 2,
+            "team_b_strategist_calls": 0,
+            "team_b_evaluator_calls": 0,
+            "team_b_forced_moves": 0,
+        },
+    )
+    report_single = format_match_report(
+        single_tenace,
+        team_a_name="Tenace",
+        team_b_name="Baseline",
+        team_a_profile="L1:gemini-4-argon | L2:decisions/gemini-decision-1",
+    )
+    assert "Team A  : Tenace (L1:gemini-4-argon | L2:decisions/gemini-decision-1)" in report_single
+    assert "Team B  :" not in report_single
+    assert "Tenace: strategist_calls=" not in report_single
+
+    # When Team B has >0 activity, both profile headers and per-team breakdown render
+    h2h_summary = MatchSummary(
+        tournament_seed=42,
+        boards=[],
+        telemetry={
+            "strategist_calls": 9,
+            "evaluator_calls": 15,
+            "forced_moves": 5,
+            "team_a_strategist_calls": 5,
+            "team_a_evaluator_calls": 8,
+            "team_a_forced_moves": 2,
+            "team_b_strategist_calls": 4,
+            "team_b_evaluator_calls": 7,
+            "team_b_forced_moves": 3,
+        },
+    )
+    report_h2h = format_match_report(
+        h2h_summary,
+        team_a_name="Tenace-A",
+        team_b_name="Tenace-B",
+        team_a_profile="L1:gemini-4-argon | L2:decisions/gemini-decision-1",
+        team_b_profile="L1:gemini-4-argon | L2:diffusion-gemma/diffusiongemma-26b-a4b-it",
+    )
+    assert "Team A  : Tenace-A (L1:gemini-4-argon | L2:decisions/gemini-decision-1)" in report_h2h
+    assert (
+        "Team B  : Tenace-B (L1:gemini-4-argon | L2:diffusion-gemma/diffusiongemma-26b-a4b-it)"
+        in report_h2h
+    )
+    assert "Tenace-A: strategist_calls=5, evaluator_calls=8, forced_moves=2" in report_h2h
+    assert "Tenace-B: strategist_calls=4, evaluator_calls=7, forced_moves=3" in report_h2h
+
 
 def test_cli_parser_defaults_to_vertex_and_gcp_env(monkeypatch):
+    import tenace.cli as cli_mod
+
+    assert "ModelProfile" in cli_mod.__all__
+    assert "build_clients_for_profile" in cli_mod.__all__
+    assert "resolve_model_profiles" in cli_mod.__all__
+
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "my-bridge-gcp-proj")
     parser = build_arg_parser()
     args = parser.parse_args([])
@@ -397,15 +463,46 @@ def test_cli_parser_defaults_to_vertex_and_gcp_env(monkeypatch):
     assert args.project == "my-bridge-gcp-proj"
     assert args.strategist_location == "global"
     assert args.strategist_model == "gemini-4-argon"
-    assert args.evaluator_backend == "diffusion-gemma"
-    assert args.evaluator_location == "us-central1"
-    assert args.evaluator_model == "publishers/google/models/diffusiongemma-26b-a4b-it"
+    assert args.evaluator_backend == "decisions"
+    assert args.evaluator_location is None
+    assert args.evaluator_model is None
     assert args.evaluator_endpoint_id is None
+    assert args.decisions_auth == "vertex"
+    assert args.decisions_violation_threshold == pytest.approx(0.70)
     assert args.opponent == "baseline"
+    assert args.opponent_strategist_model is None
+    assert args.opponent_evaluator_backend is None
     assert args.boards == 4
     assert args.seed == 42
     assert args.dds_worlds == 16
     assert args.double_dummy is False
+
+    # Verify smart ModelProfile resolution across all 3 evaluator backends
+    dec_profile, dec_opp = resolve_model_profiles(args)
+    assert dec_opp is None
+    assert dec_profile.evaluator_backend == "decisions"
+    assert dec_profile.evaluator_location == "global"
+    assert dec_profile.evaluator_model == "gemini-decision-1"
+    assert dec_profile.short_label() == "L1:gemini-4-argon | L2:decisions/gemini-decision-1"
+
+    diff_profile = ModelProfile(evaluator_backend="diffusion-gemma")
+    assert diff_profile.evaluator_location == "us-central1"
+    assert diff_profile.evaluator_model == "publishers/google/models/diffusiongemma-26b-a4b-it"
+    assert (
+        diff_profile.short_label()
+        == "L1:gemini-4-argon | L2:diffusion-gemma/diffusiongemma-26b-a4b-it"
+    )
+
+    gem_profile = ModelProfile(evaluator_backend="gemini")
+    assert gem_profile.evaluator_location == "global"
+    assert gem_profile.evaluator_model == "gemini-2.5-flash"
+    assert gem_profile.short_label() == "L1:gemini-4-argon | L2:gemini/gemini-2.5-flash"
+
+    mock_profile = ModelProfile(mode="mock")
+    assert (
+        mock_profile.short_label()
+        == "mock | L1:gemini-4-argon | L2:decisions/gemini-decision-1"
+    )
 
     # Unset or empty GOOGLE_CLOUD_PROJECT falls back to your-gcp-project-id
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
@@ -420,6 +517,7 @@ def test_cli_vertex_mode_wires_gemini_and_diffusion_gemma_clients(monkeypatch):
 
     gemini_inits: list[dict[str, Any]] = []
     diffusion_inits: list[dict[str, Any]] = []
+    decisions_inits: list[dict[str, Any]] = []
 
     class FakeGeminiClient(HeuristicMockModelClient):
         def __init__(self, **kwargs: Any) -> None:
@@ -429,10 +527,80 @@ def test_cli_vertex_mode_wires_gemini_and_diffusion_gemma_clients(monkeypatch):
         def __init__(self, **kwargs: Any) -> None:
             diffusion_inits.append(kwargs)
 
+    class FakeDecisionsClient(HeuristicMockModelClient):
+        def __init__(self, **kwargs: Any) -> None:
+            decisions_inits.append(kwargs)
+
     monkeypatch.setattr(cli_mod, "VertexGeminiClient", FakeGeminiClient)
     monkeypatch.setattr(cli_mod, "DiffusionGemmaClient", FakeDiffusionClient)
+    monkeypatch.setattr(cli_mod, "GeminiDecisionsClient", FakeDecisionsClient)
 
-    # 1. Default --evaluator-backend diffusion-gemma with endpoint_id
+    # 1. Default --evaluator-backend decisions with --decisions-auth vertex
+    rc0 = run_cli(
+        [
+            "--mode",
+            "vertex",
+            "--project",
+            "proj-decisions",
+            "--boards",
+            "1",
+            "--dds-worlds",
+            "1",
+            "--double-dummy",
+        ]
+    )
+    assert rc0 == 0
+    assert len(gemini_inits) == 1
+    assert gemini_inits[0] == {
+        "project": "proj-decisions",
+        "location": "global",
+        "model": "gemini-4-argon",
+    }
+    assert len(decisions_inits) == 1
+    assert decisions_inits[0] == {
+        "project": "proj-decisions",
+        "location": "global",
+        "model": "gemini-decision-1",
+        "vertexai": True,
+        "violation_threshold": 0.70,
+    }
+
+    # 2. --evaluator-backend decisions with --decisions-auth api-key and threshold override
+    gemini_inits.clear()
+    decisions_inits.clear()
+    rc0b = run_cli(
+        [
+            "--mode",
+            "vertex",
+            "--project",
+            "proj-decisions",
+            "--decisions-auth",
+            "api-key",
+            "--decisions-violation-threshold",
+            "0.82",
+            "--evaluator-model",
+            "gemini-decision-exp",
+            "--boards",
+            "1",
+            "--dds-worlds",
+            "1",
+            "--double-dummy",
+        ]
+    )
+    assert rc0b == 0
+    assert len(decisions_inits) == 1
+    assert decisions_inits[0] == {
+        "project": None,
+        "location": "global",
+        "model": "gemini-decision-exp",
+        "vertexai": False,
+        "violation_threshold": 0.82,
+    }
+
+    # 3. --evaluator-backend diffusion-gemma with endpoint_id (auto-resolving us-central1 & MaaS model)
+    gemini_inits.clear()
+    diffusion_inits.clear()
+    decisions_inits.clear()
     rc = run_cli(
         [
             "--mode",
@@ -445,8 +613,6 @@ def test_cli_vertex_mode_wires_gemini_and_diffusion_gemma_clients(monkeypatch):
             "gemini-2.5-pro",
             "--evaluator-backend",
             "diffusion-gemma",
-            "--evaluator-location",
-            "us-central1",
             "--evaluator-endpoint-id",
             "ep-98765",
             "--boards",
@@ -469,7 +635,7 @@ def test_cli_vertex_mode_wires_gemini_and_diffusion_gemma_clients(monkeypatch):
         "maas_model_name": "publishers/google/models/diffusiongemma-26b-a4b-it",
     }
 
-    # 2. --evaluator-backend gemini WITHOUT overriding --evaluator-model -> defaults to gemini-2.5-flash
+    # 4. --evaluator-backend gemini WITHOUT overriding --evaluator-model -> defaults to gemini-2.5-flash & global
     gemini_inits.clear()
     diffusion_inits.clear()
     rc2 = run_cli(
@@ -480,8 +646,6 @@ def test_cli_vertex_mode_wires_gemini_and_diffusion_gemma_clients(monkeypatch):
             "proj-beta",
             "--evaluator-backend",
             "gemini",
-            "--evaluator-location",
-            "global",
             "--boards",
             "1",
             "--dds-worlds",
@@ -500,7 +664,7 @@ def test_cli_vertex_mode_wires_gemini_and_diffusion_gemma_clients(monkeypatch):
         "temperature": 0.2,
     }
 
-    # 3. --evaluator-backend gemini WITH explicit --evaluator-model override
+    # 5. --evaluator-backend gemini WITH explicit --evaluator-model override
     gemini_inits.clear()
     rc3 = run_cli(
         [
@@ -522,6 +686,140 @@ def test_cli_vertex_mode_wires_gemini_and_diffusion_gemma_clients(monkeypatch):
     assert rc3 == 0
     assert len(gemini_inits) == 2
     assert gemini_inits[1]["model"] == "gemini-2.5-pro"
+
+    # 6. Validate --decisions-violation-threshold bounds (strictly between 0.0 and 1.0, finite)
+    for bad_thresh in ("0.0", "1.0", "-0.2", "1.5", "nan", "inf", "-inf"):
+        with pytest.raises(ValueError, match="threshold"):
+            run_cli(["--mode", "mock", f"--decisions-violation-threshold={bad_thresh}"])
+        with pytest.raises(ValueError, match="threshold"):
+            run_cli(
+                [
+                    "--mode",
+                    "mock",
+                    "--opponent",
+                    "tenace",
+                    f"--opponent-decisions-violation-threshold={bad_thresh}",
+                ]
+            )
+
+    bad_profile = ModelProfile.model_construct(
+        mode="mock",
+        project="proj",
+        strategist_location="global",
+        strategist_model="gemini-4-argon",
+        evaluator_backend="decisions",
+        evaluator_location="global",
+        evaluator_model="gemini-decision-1",
+        evaluator_endpoint_id=None,
+        decisions_auth="vertex",
+        decisions_violation_threshold=1.0,
+    )
+    with pytest.raises(ValueError, match="threshold"):
+        build_clients_for_profile(bad_profile)
+
+
+def test_cli_head_to_head_tenace_opponent_compares_two_model_profiles(monkeypatch, capsys):
+    import tenace.cli as cli_mod
+
+    gemini_inits: list[dict[str, Any]] = []
+    diffusion_inits: list[dict[str, Any]] = []
+    decisions_inits: list[dict[str, Any]] = []
+
+    class FakeGeminiClient(HeuristicMockModelClient):
+        def __init__(self, **kwargs: Any) -> None:
+            gemini_inits.append(kwargs)
+
+    class FakeDiffusionClient(HeuristicMockModelClient):
+        def __init__(self, **kwargs: Any) -> None:
+            diffusion_inits.append(kwargs)
+
+    class FakeDecisionsClient(HeuristicMockModelClient):
+        def __init__(self, **kwargs: Any) -> None:
+            decisions_inits.append(kwargs)
+
+    monkeypatch.setattr(cli_mod, "VertexGeminiClient", FakeGeminiClient)
+    monkeypatch.setattr(cli_mod, "DiffusionGemmaClient", FakeDiffusionClient)
+    monkeypatch.setattr(cli_mod, "GeminiDecisionsClient", FakeDecisionsClient)
+
+    # 1. Vertex head-to-head: Team A (gemini-4-argon + decisions/gemini-decision-1)
+    #    vs Team B (gemini-2.5-pro + diffusion-gemma/diffusiongemma-26b-a4b-it)
+    rc_vertex = run_cli(
+        [
+            "--mode",
+            "vertex",
+            "--project",
+            "proj-h2h",
+            "--opponent",
+            "tenace",
+            "--opponent-strategist-model",
+            "gemini-2.5-pro",
+            "--opponent-evaluator-backend",
+            "diffusion-gemma",
+            "--boards",
+            "1",
+            "--dds-worlds",
+            "1",
+            "--double-dummy",
+        ]
+    )
+    assert rc_vertex == 0
+    assert len(gemini_inits) == 2
+    assert gemini_inits[0]["model"] == "gemini-4-argon"
+    assert gemini_inits[1]["model"] == "gemini-2.5-pro"
+    assert len(decisions_inits) == 1
+    assert decisions_inits[0] == {
+        "project": "proj-h2h",
+        "location": "global",
+        "model": "gemini-decision-1",
+        "vertexai": True,
+        "violation_threshold": 0.70,
+    }
+    assert len(diffusion_inits) == 1
+    assert diffusion_inits[0] == {
+        "project": "proj-h2h",
+        "location": "us-central1",
+        "endpoint_id": None,
+        "maas_model_name": "publishers/google/models/diffusiongemma-26b-a4b-it",
+    }
+
+    out_vertex = capsys.readouterr().out
+    assert "Matchup : Tenace-A vs Tenace-B" in out_vertex
+    assert "Team A  : Tenace-A (L1:gemini-4-argon | L2:decisions/gemini-decision-1)" in out_vertex
+    assert (
+        "Team B  : Tenace-B (L1:gemini-2.5-pro | L2:diffusion-gemma/diffusiongemma-26b-a4b-it)"
+        in out_vertex
+    )
+    assert "Tenace-A: strategist_calls=" in out_vertex
+    assert "Tenace-B: strategist_calls=" in out_vertex
+
+    # 2. Mock head-to-head full card play smoke
+    rc_mock = run_cli(
+        [
+            "--mode",
+            "mock",
+            "--opponent",
+            "tenace",
+            "--opponent-evaluator-backend",
+            "diffusion-gemma",
+            "--boards",
+            "1",
+            "--dds-worlds",
+            "1",
+        ]
+    )
+    assert rc_mock == 0
+    out_mock = capsys.readouterr().out
+    assert "Matchup : Tenace-A vs Tenace-B" in out_mock
+    assert (
+        "Team A  : Tenace-A (mock | L1:gemini-4-argon | L2:decisions/gemini-decision-1)"
+        in out_mock
+    )
+    assert (
+        "Team B  : Tenace-B (mock | L1:gemini-4-argon | L2:diffusion-gemma/diffusiongemma-26b-a4b-it)"
+        in out_mock
+    )
+    assert "Tenace-A: strategist_calls=" in out_mock
+    assert "Tenace-B: strategist_calls=" in out_mock
 
 
 def test_cli_bluechip_opponent_end_to_end_with_subprocess_peer(capsys):

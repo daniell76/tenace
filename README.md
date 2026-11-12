@@ -1,6 +1,6 @@
 # Tenace: 3-Layer Neuro-Symbolic Contract Bridge AI
 
-**Tenace** is a fair-play, three-layer neuro-symbolic Contract Bridge agent built on [OpenSpiel](https://github.com/google-deepmind/open_spiel) (`bridge`), **Vertex AI Gemini 4 Argon** (`gemini-4-argon`, event-driven strategic planning), and **DiffusionGemma** (parallel denoising tactical option evaluation), grounded by constrained double-dummy infostate rollouts and an anti-blunder gate.
+**Tenace** is a fair-play, three-layer neuro-symbolic Contract Bridge agent built on [OpenSpiel](https://github.com/google-deepmind/open_spiel) (`bridge`), configurable **Vertex AI Gemini** event-driven strategic planning (`gemini-4-argon` default), and configurable **Layer-2 Tactical Option Evaluators** (**Gemini Decisions API** `gemini-decision-1` zero-output-token prefill scoring, **DiffusionGemma** parallel denoising, or **Gemini 2.5 Flash**), grounded by constrained double-dummy infostate rollouts and an anti-blunder gate.
 
 ## Architecture
 
@@ -13,7 +13,8 @@ Layer 3 — Symbolic Rule Fact Tracker & Action Collapser (`tenace.layer3_rules`
    ├── Collapses contiguous/bridged rank-equivalent cards (0-API Fast Path if 1 candidate!)
    │
    ▼
-Layer 1 — Event-Driven Strategist (`tenace.layer1_strategist`, Gemini 4 Argon)
+Layer 1 — Event-Driven Strategist (`tenace.layer1_strategist`, Configurable Gemini)
+   ├── Default: `gemini-4-argon` (supports `gemini-4-carbon`, `gemini-2.5-pro`, etc.)
    ├── Runs ONLY on board start, phase transition, dummy reveal, surprise void, or Layer-2 interrupt
    ├── Produces structured `StrategyState` (plan, assumptions, hard seat HCP/suit-length constraints)
    │
@@ -23,7 +24,11 @@ Layer 3 — Constrained Infostate DDS Sampler (`RuleDDSEvaluator`)
    ├── Computes `baseline_ev` & `make_prob` per candidate action
    │
    ▼
-Layer 2 — Tactical Option Evaluator (`tenace.layer2_evaluator`, DiffusionGemma)
+Layer 2 — Tactical Option Evaluator (`tenace.layer2_evaluator.TacticalOptionEvaluator`)
+   ├── Configurable backends:
+   │     • `decisions` (default): `gemini-decision-1` via `client.decisions.create` (0 output tokens!)
+   │     • `diffusion-gemma`: `DiffusionGemma` (`diffusiongemma-26b-a4b-it` MaaS or Vertex Endpoint)
+   │     • `gemini`: `VertexGeminiClient` (`gemini-2.5-flash` structured JSON scoring)
    ├── Scores all legal candidates simultaneously in `[0.0, 1.0]`
    ├── Closed-Loop Interrupt: if `assumption_violated=True`, triggers 1 immediate Layer-1 replan + re-eval
    │
@@ -49,7 +54,7 @@ All unit and integration tests run 100% offline using deterministic OpenSpiel de
 
 ## `tenace-match` CLI Runner
 
-Tenace ships with the `tenace-match` CLI entrypoint to run two-room WBF Duplicate IMP matches and print a formatted board-by-board scorecard with Open/Closed Room contracts, auctions, trick logs, Layer-1 Strategist revision traces, and API telemetry.
+Tenace ships with the `tenace-match` CLI entrypoint to run two-room WBF Duplicate IMP matches and print a formatted board-by-board scorecard with Open/Closed Room contracts, auctions, trick logs, Layer-1 Strategist revision traces, and per-team API telemetry.
 
 ### 1. Offline 3-Layer Smoke Match (`--mode mock`)
 
@@ -59,22 +64,67 @@ Run the full 3-layer neuro-symbolic pipeline locally without network credentials
 uv run tenace-match --mode mock --boards 2 --dds-worlds 8
 ```
 
-### 2. Live Vertex AI Match (Gemini 4 Argon + DiffusionGemma)
+### 2. Live Vertex AI Match (Configurable Layer-1 & Layer-2 Backends)
 
-Authenticate with Google Cloud Application Default Credentials (`gcloud auth application-default login`) and run against live Vertex AI models:
+Authenticate with Google Cloud Application Default Credentials (`gcloud auth application-default login`) and run against live models (`--evaluator-location` and `--evaluator-model` auto-resolve per backend when omitted):
 
 ```bash
-# Default: Layer-1 Gemini 4 Argon (gemini-4-argon, global) + Layer-2 DiffusionGemma (us-central1)
+# Default: Layer-1 Gemini 4 Argon (gemini-4-argon, global)
+#        + Layer-2 Gemini Decisions API (gemini-decision-1, global, 0 output tokens!)
 uv run tenace-match --project your-gcp-project-id --boards 4
 
-# Optional dedicated Vertex AI Endpoint ID for DiffusionGemma:
-uv run tenace-match --project your-gcp-project-id --evaluator-endpoint-id 1234567890 --boards 4
+# Gemini Decisions API via Gemini API key ($GEMINI_API_KEY / v1beta) + custom violation threshold:
+uv run tenace-match \
+  --project your-gcp-project-id \
+  --evaluator-backend decisions \
+  --decisions-auth api-key \
+  --decisions-violation-threshold 0.75 \
+  --boards 4
 
-# Gemini-only Layer-2 Evaluator fallback (defaults to gemini-2.5-flash when --evaluator-model is omitted):
-uv run tenace-match --project your-gcp-project-id --evaluator-backend gemini --evaluator-location global --boards 4
+# Layer-2 DiffusionGemma (auto-resolves location=us-central1 & MaaS model name):
+uv run tenace-match \
+  --project your-gcp-project-id \
+  --evaluator-backend diffusion-gemma \
+  --boards 4
+
+# Optional dedicated Vertex AI Endpoint ID for DiffusionGemma:
+uv run tenace-match \
+  --project your-gcp-project-id \
+  --evaluator-backend diffusion-gemma \
+  --evaluator-endpoint-id 1234567890 \
+  --boards 4
+
+# Layer-2 Gemini structured JSON evaluator (auto-resolves gemini-2.5-flash in global):
+uv run tenace-match \
+  --project your-gcp-project-id \
+  --evaluator-backend gemini \
+  --boards 4
 ```
 
-### 3. Playing Championship Engines (WBridge5 & BEN) via BlueChip Protocol v18
+### 3. Head-to-Head Model Benchmarking (`--opponent tenace`)
+
+Pit two distinct Tenace model profiles directly against each other in a symmetric two-room WBF Duplicate IMP match (`Tenace-A` vs `Tenace-B`, with per-team API call telemetry):
+
+```bash
+# Compare Layer-2 Evaluators: Gemini Decisions API (Team A) vs DiffusionGemma (Team B)
+uv run tenace-match \
+  --project your-gcp-project-id \
+  --evaluator-backend decisions \
+  --opponent tenace \
+  --opponent-evaluator-backend diffusion-gemma \
+  --boards 8
+
+# Compare Layer-1 Strategists: gemini-4-argon (Team A) vs gemini-2.5-pro (Team B)
+# (Omitted --opponent-* flags automatically inherit Team A's configuration!)
+uv run tenace-match \
+  --project your-gcp-project-id \
+  --strategist-model gemini-4-argon \
+  --opponent tenace \
+  --opponent-strategist-model gemini-2.5-pro \
+  --boards 8
+```
+
+### 4. Playing Championship Engines (WBridge5 & BEN) via BlueChip Protocol v18
 
 Tenace includes a WBF-compliant BlueChip Bridge Protocol v18 Table Manager TCP adapter (`BlueChipSeatBot` + `SubprocessTcpBlueChipController`) so Tenace can play automated duplicate matches directly against external championship engines such as **WBridge5** (via Wine) or **BEN** (Bridge Engine Neural). Pass `{port}` in `--bluechip-cmd` for the per-seat loopback callback port:
 
@@ -102,6 +152,7 @@ You can also wire `TenaceAgent` and `DuplicateMatchRunner` directly in Python:
 from tenace import (
     DiffusionGemmaClient,
     DuplicateMatchRunner,
+    GeminiDecisionsClient,
     SAYC_CONVENTION_CARD,
     Seat,
     TenaceAgent,
@@ -120,13 +171,20 @@ strategist_client = VertexGeminiClient(
     temperature=0.2,
 )
 
-# Layer 2: Parallel denoising tactical evaluator (DiffusionGemma via Vertex Endpoint or MaaS)
-evaluator_client = DiffusionGemmaClient(
+# Layer 2 (Option A, default): Zero-output-token Gemini Decisions API (gemini-decision-1)
+evaluator_client = GeminiDecisionsClient(
     project=PROJECT_ID,
-    location="us-central1",
-    # Optional dedicated Vertex AI Endpoint ID; omit to use MaaS model name:
-    # endpoint_id="1234567890",
+    location="global",
+    model="gemini-decision-1",
+    violation_threshold=0.70,
 )
+
+# Layer 2 (Option B): Parallel denoising tactical evaluator (DiffusionGemma via Endpoint or MaaS)
+# evaluator_client = DiffusionGemmaClient(
+#     project=PROJECT_ID,
+#     location="us-central1",
+#     endpoint_id="1234567890",  # Optional dedicated Vertex AI Endpoint ID
+# )
 
 
 def make_tenace_seat(seat: Seat) -> TenaceAgent:

@@ -334,15 +334,42 @@ class DuplicateMatchRunner:
                     )
                 )
 
-            all_bots = list(open_room_seats.values()) + list(closed_room_seats.values())
+            team_a_bots = [
+                open_room_seats[Seat.NORTH],
+                open_room_seats[Seat.SOUTH],
+                closed_room_seats[Seat.EAST],
+                closed_room_seats[Seat.WEST],
+            ]
+            team_b_bots = [
+                open_room_seats[Seat.EAST],
+                open_room_seats[Seat.WEST],
+                closed_room_seats[Seat.NORTH],
+                closed_room_seats[Seat.SOUTH],
+            ]
+            team_a_forced = sum(int(getattr(bot, "forced_moves", 0)) for bot in team_a_bots)
+            team_a_strat = sum(
+                int(getattr(bot, "strategist_calls", 0)) for bot in team_a_bots
+            )
+            team_a_eval = sum(
+                int(getattr(bot, "evaluator_calls", 0)) for bot in team_a_bots
+            )
+            team_b_forced = sum(int(getattr(bot, "forced_moves", 0)) for bot in team_b_bots)
+            team_b_strat = sum(
+                int(getattr(bot, "strategist_calls", 0)) for bot in team_b_bots
+            )
+            team_b_eval = sum(
+                int(getattr(bot, "evaluator_calls", 0)) for bot in team_b_bots
+            )
             telemetry = {
-                "forced_moves": sum(int(getattr(bot, "forced_moves", 0)) for bot in all_bots),
-                "strategist_calls": sum(
-                    int(getattr(bot, "strategist_calls", 0)) for bot in all_bots
-                ),
-                "evaluator_calls": sum(
-                    int(getattr(bot, "evaluator_calls", 0)) for bot in all_bots
-                ),
+                "forced_moves": team_a_forced + team_b_forced,
+                "strategist_calls": team_a_strat + team_b_strat,
+                "evaluator_calls": team_a_eval + team_b_eval,
+                "team_a_forced_moves": team_a_forced,
+                "team_a_strategist_calls": team_a_strat,
+                "team_a_evaluator_calls": team_a_eval,
+                "team_b_forced_moves": team_b_forced,
+                "team_b_strategist_calls": team_b_strat,
+                "team_b_evaluator_calls": team_b_eval,
             }
 
             return MatchSummary(
