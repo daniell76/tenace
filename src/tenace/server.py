@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from collections import OrderedDict
 from collections.abc import Mapping
 import os
 import random
+import threading
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
@@ -45,8 +47,10 @@ from tenace.layer3_rules import (
     collapse_equivalent_actions,
     trick_winner,
 )
+from tenace.models.clients import StructuredModelClient
 
 SERVICE_VERSION = "0.1.0"
+_MAX_CACHED_PROFILES = 16
 
 _CARD_LABEL_TO_ID: dict[str, int] = {
     action_label(card).upper(): card for card in range(NUM_CARDS)
@@ -620,6 +624,11 @@ def reconstruct_step_state(
     if req.prior_strategy is None:
         return board_state, None, False
 
+    if board_state.current_phase() == 1 and req.prior_strategy.phase == "play":
+        raise ValueError(
+            "prior_strategy with phase='play' cannot be used during the auction phase"
+        )
+
     if req.prior_strategy.phase == "play":
         if had_post_lead_play_decision:
             return board_state, last_decision_voids, True
@@ -634,6 +643,21 @@ def reconstruct_step_state(
         else {seat_k: set() for seat_k in Seat}
     )
     return board_state, prev_voids, False
+
+
+def _profile_cache_key(profile: ModelProfile) -> tuple[Any, ...]:
+    return (
+        profile.mode,
+        profile.project,
+        profile.strategist_location,
+        profile.strategist_model,
+        profile.evaluator_backend,
+        profile.evaluator_location,
+        profile.evaluator_model,
+        profile.evaluator_endpoint_id,
+        profile.decisions_auth,
+        profile.decisions_violation_threshold,
+    )
 
 
 def create_app(
@@ -657,6 +681,33 @@ def create_app(
             )
         resolved_dds_worlds = default_dds_worlds
 
+    client_cache_lock = threading.Lock()
+    client_cache: OrderedDict[
+        tuple[Any, ...], tuple[StructuredModelClient, StructuredModelClient]
+    ] = OrderedDict()
+
+    def get_cached_clients(
+        profile: ModelProfile,
+        *,
+        is_caller_override: bool,
+    ) -> tuple[StructuredModelClient, StructuredModelClient]:
+        key = _profile_cache_key(profile)
+        with client_cache_lock:
+            cached = client_cache.get(key)
+            if cached is not None:
+                client_cache.move_to_end(key)
+                return cached
+            try:
+                built = build_clients_for_profile(profile)
+            except ValueError as exc:
+                status_code = 422 if is_caller_override else 500
+                raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+            client_cache[key] = built
+            client_cache.move_to_end(key)
+            while len(client_cache) > _MAX_CACHED_PROFILES:
+                client_cache.popitem(last=False)
+            return built
+
     app = FastAPI(
         title="Tenace Bridge Service",
         version=SERVICE_VERSION,
@@ -664,7 +715,7 @@ def create_app(
     )
 
     @app.get("/healthz")
-    def healthz() -> dict[str, Any]:
+    async def healthz() -> dict[str, Any]:
         return {
             "status": "ok",
             "service": "tenace",
@@ -678,36 +729,44 @@ def create_app(
     def step_endpoint(req: StepRequest) -> StepResponse:
         try:
             state, prev_voids, dummy_seen = reconstruct_step_state(req)
-            observer = Seat[req.seat]
-            active_profile = req.profile if req.profile is not None else resolved_profile
-            active_dds_worlds = (
-                req.dds_worlds if req.dds_worlds is not None else resolved_dds_worlds
-            )
-            strategist_client, evaluator_client = build_clients_for_profile(
-                active_profile
-            )
-            agent = TenaceAgent(
-                seat=observer,
-                strategist_client=strategist_client,
-                evaluator_client=evaluator_client,
-                dds_evaluator=RuleDDSEvaluator(
-                    num_worlds=active_dds_worlds,
-                    rng_seed=req.seed,
-                ),
-                convention_card=SAYC_CONVENTION_CARD,
-            )
-            if req.prior_strategy is not None:
-                agent.strategy = req.prior_strategy
-                agent.strategy_history = [req.prior_strategy]
-                agent._prev_voids = prev_voids
-                agent._dummy_seen = dummy_seen
-
-            phase: Literal["auction", "play"] = (
-                "auction" if state.current_phase() == 1 else "play"
-            )
-            chosen_action = agent.step(state)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        observer = Seat[req.seat]
+        active_profile = req.profile if req.profile is not None else resolved_profile
+        active_dds_worlds = (
+            req.dds_worlds if req.dds_worlds is not None else resolved_dds_worlds
+        )
+        strategist_client, evaluator_client = get_cached_clients(
+            active_profile,
+            is_caller_override=req.profile is not None,
+        )
+        agent = TenaceAgent(
+            seat=observer,
+            strategist_client=strategist_client,
+            evaluator_client=evaluator_client,
+            dds_evaluator=RuleDDSEvaluator(
+                num_worlds=active_dds_worlds,
+                rng_seed=req.seed,
+            ),
+            convention_card=SAYC_CONVENTION_CARD,
+        )
+        if req.prior_strategy is not None:
+            agent.strategy = req.prior_strategy
+            agent.strategy_history = [req.prior_strategy]
+            agent._prev_voids = prev_voids
+            agent._dummy_seen = dummy_seen
+
+        phase: Literal["auction", "play"] = (
+            "auction" if state.current_phase() == 1 else "play"
+        )
+        try:
+            chosen_action = agent.step(state)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Upstream model evaluation error: {exc}",
+            ) from exc
 
         return StepResponse(
             action_id=chosen_action,
@@ -724,73 +783,83 @@ def create_app(
 
     @app.post("/v1/match", response_model=MatchResponse)
     def match_endpoint(req: MatchRequest) -> MatchResponse:
-        try:
-            active_dds_worlds = (
-                req.dds_worlds if req.dds_worlds is not None else resolved_dds_worlds
-            )
-            profile_a = (
-                req.team_a_profile
-                if req.team_a_profile is not None
-                else resolved_profile
-            )
-            strategist_a, evaluator_a = build_clients_for_profile(profile_a)
+        active_dds_worlds = (
+            req.dds_worlds if req.dds_worlds is not None else resolved_dds_worlds
+        )
+        profile_a = (
+            req.team_a_profile
+            if req.team_a_profile is not None
+            else resolved_profile
+        )
+        strategist_a, evaluator_a = get_cached_clients(
+            profile_a,
+            is_caller_override=req.team_a_profile is not None,
+        )
 
-            def team_a_factory(seat: Seat) -> BridgeSeatBot:
+        def team_a_factory(seat: Seat) -> BridgeSeatBot:
+            return TenaceAgent(
+                seat=seat,
+                strategist_client=strategist_a,
+                evaluator_client=evaluator_a,
+                dds_evaluator=RuleDDSEvaluator(
+                    num_worlds=active_dds_worlds,
+                    rng_seed=(req.seed * 31) + int(seat),
+                ),
+                convention_card=SAYC_CONVENTION_CARD,
+            )
+
+        if req.opponent == "tenace":
+            profile_b = (
+                req.team_b_profile if req.team_b_profile is not None else profile_a
+            )
+            team_a_name = "Tenace-A"
+            team_b_name = "Tenace-B"
+            team_b_profile_label: str | None = profile_b.short_label()
+            strategist_b, evaluator_b = get_cached_clients(
+                profile_b,
+                is_caller_override=req.team_b_profile is not None,
+            )
+
+            def team_b_factory(seat: Seat) -> BridgeSeatBot:
                 return TenaceAgent(
                     seat=seat,
-                    strategist_client=strategist_a,
-                    evaluator_client=evaluator_a,
+                    strategist_client=strategist_b,
+                    evaluator_client=evaluator_b,
                     dds_evaluator=RuleDDSEvaluator(
                         num_worlds=active_dds_worlds,
-                        rng_seed=(req.seed * 31) + int(seat),
+                        rng_seed=(req.seed * 37) + int(seat) + 100,
                     ),
                     convention_card=SAYC_CONVENTION_CARD,
                 )
+        else:
+            team_a_name = "Tenace"
+            team_b_name = "Baseline"
+            team_b_profile_label = None
+            team_b_factory = FirstLegalPassBaselineBot
 
-            if req.opponent == "tenace":
-                profile_b = (
-                    req.team_b_profile if req.team_b_profile is not None else profile_a
-                )
-                team_a_name = "Tenace-A"
-                team_b_name = "Tenace-B"
-                team_b_profile_label: str | None = profile_b.short_label()
-                strategist_b, evaluator_b = build_clients_for_profile(profile_b)
-
-                def team_b_factory(seat: Seat) -> BridgeSeatBot:
-                    return TenaceAgent(
-                        seat=seat,
-                        strategist_client=strategist_b,
-                        evaluator_client=evaluator_b,
-                        dds_evaluator=RuleDDSEvaluator(
-                            num_worlds=active_dds_worlds,
-                            rng_seed=(req.seed * 37) + int(seat) + 100,
-                        ),
-                        convention_card=SAYC_CONVENTION_CARD,
-                    )
-            else:
-                team_a_name = "Tenace"
-                team_b_name = "Baseline"
-                team_b_profile_label = None
-                team_b_factory = FirstLegalPassBaselineBot
-
-            runner = DuplicateMatchRunner(
-                tournament_seed=req.seed,
-                use_double_dummy_result=req.double_dummy,
-            )
+        runner = DuplicateMatchRunner(
+            tournament_seed=req.seed,
+            use_double_dummy_result=req.double_dummy,
+        )
+        try:
             summary = runner.play_match(
                 team_a_factory=team_a_factory,
                 team_b_factory=team_b_factory,
                 num_boards=req.boards,
             )
-            report = format_match_report(
-                summary,
-                team_a_name=team_a_name,
-                team_b_name=team_b_name,
-                team_a_profile=profile_a.short_label(),
-                team_b_profile=team_b_profile_label,
-            )
         except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+            raise HTTPException(
+                status_code=502,
+                detail=f"Upstream model evaluation error: {exc}",
+            ) from exc
+
+        report = format_match_report(
+            summary,
+            team_a_name=team_a_name,
+            team_b_name=team_b_name,
+            team_a_profile=profile_a.short_label(),
+            team_b_profile=team_b_profile_label,
+        )
 
         return MatchResponse(
             team_a_name=team_a_name,

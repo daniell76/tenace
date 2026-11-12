@@ -4,7 +4,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PORT=8080
 
-RUN useradd --create-home --shell /bin/bash tenace
+RUN useradd --create-home --shell /usr/sbin/nologin tenace
 
 WORKDIR /app
 

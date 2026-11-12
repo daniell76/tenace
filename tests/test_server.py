@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 import tomllib
+from typing import TypeVar
 
 from fastapi.testclient import TestClient
 import pyspiel
 import pytest
+from pydantic import BaseModel
 
 import tenace
 from tenace.agent import TenaceAgent
@@ -737,7 +740,7 @@ def test_dockerfile_and_dockerignore_conventions() -> None:
     dockerfile = dockerfile_path.read_text(encoding="utf-8")
     assert "FROM python:3.13-slim" in dockerfile
     assert "PORT=8080" in dockerfile
-    assert "useradd" in dockerfile
+    assert "useradd --create-home --shell /usr/sbin/nologin tenace" in dockerfile
     assert "USER tenace" in dockerfile
     assert "EXPOSE 8080" in dockerfile
     assert 'CMD ["tenace-serve"]' in dockerfile
@@ -747,4 +750,318 @@ def test_dockerfile_and_dockerignore_conventions() -> None:
         for line in dockerignore_path.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.strip().startswith("#")
     }
-    assert {".git", ".venv", "uv.lock", "terraform", "tests", "docs"} <= dockerignore_lines
+    assert {
+        ".git",
+        ".venv",
+        ".env*",
+        "build",
+        "dist",
+        ".mypy_cache",
+        ".ruff_cache",
+        "uv.lock",
+        "terraform",
+        "tests",
+        "docs",
+    } <= dockerignore_lines
+
+
+def test_healthz_is_async_and_lazy_under_vertex_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TENACE_MODE", "vertex")
+    monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+
+    def fail_if_called(_profile: ModelProfile) -> object:
+        raise AssertionError("build_clients_for_profile must not run during create_app or /healthz")
+
+    monkeypatch.setattr(server_mod, "build_clients_for_profile", fail_if_called)
+
+    app = create_app()
+    health_routes = [
+        route for route in app.routes if getattr(route, "path", None) == "/healthz"
+    ]
+    assert len(health_routes) == 1
+    assert inspect.iscoroutinefunction(health_routes[0].endpoint)
+
+    client = TestClient(app)
+    resp = client.get("/healthz")
+    assert resp.status_code == 200
+    assert resp.json()["mode"] == "vertex"
+
+
+def test_error_status_codes_separate_422_client_500_server_and_502_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    TModel = TypeVar("TModel", bound=BaseModel)
+
+    class FailingUpstreamClient:
+        def generate_structured(
+            self,
+            system_prompt: str,
+            user_prompt: str,
+            schema: type[TModel],
+        ) -> TModel:
+            del system_prompt, user_prompt, schema
+            raise ValueError("Empty response from Gemini model")
+
+    # 1. Server misconfiguration on default_profile -> 500 (NOT 422), while invalid 422 request
+    # still fails before touching default_profile client construction!
+    def fail_on_server_default(profile: ModelProfile) -> tuple[object, object]:
+        if profile.project == "broken-server-default":
+            raise ValueError("Missing server GEMINI_API_KEY")
+        if profile.project == "broken-caller-override":
+            raise ValueError("Caller supplied unsupported profile project")
+        return FailingUpstreamClient(), FailingUpstreamClient()
+
+    monkeypatch.setattr(server_mod, "build_clients_for_profile", fail_on_server_default)
+
+    broken_default_app = create_app(
+        default_profile=_mock_profile(project="broken-server-default"),
+        default_dds_worlds=1,
+    )
+    broken_client = TestClient(broken_default_app)
+
+    # Malformed request (wrong seat turn) must reject with 422 BEFORE instantiating default_profile clients
+    bad_turn = broken_client.post(
+        "/v1/step",
+        json={"seat": "EAST", "board_number": 1, "tournament_seed": 42},
+    )
+    assert bad_turn.status_code == 422
+
+    # Valid request using broken server default_profile -> 500
+    server_500_step = broken_client.post(
+        "/v1/step",
+        json={"seat": "NORTH", "board_number": 1, "tournament_seed": 42},
+    )
+    assert server_500_step.status_code == 500
+    assert "Missing server GEMINI_API_KEY" in server_500_step.json()["detail"]
+
+    server_500_match = broken_client.post(
+        "/v1/match",
+        json={"boards": 1, "dds_worlds": 1, "double_dummy": True},
+    )
+    assert server_500_match.status_code == 500
+
+    # Caller override profile failure -> 422 on both /v1/step and /v1/match
+    caller_422_step = broken_client.post(
+        "/v1/step",
+        json={
+            "seat": "NORTH",
+            "board_number": 1,
+            "tournament_seed": 42,
+            "profile": {"mode": "mock", "project": "broken-caller-override"},
+        },
+    )
+    assert caller_422_step.status_code == 422
+
+    caller_422_match = broken_client.post(
+        "/v1/match",
+        json={
+            "boards": 1,
+            "dds_worlds": 1,
+            "double_dummy": True,
+            "team_a_profile": {"mode": "mock", "project": "broken-caller-override"},
+        },
+    )
+    assert caller_422_match.status_code == 422
+
+    caller_422_match_team_b = TestClient(
+        create_app(default_profile=_mock_profile(project="upstream-fails"), default_dds_worlds=1)
+    ).post(
+        "/v1/match",
+        json={
+            "boards": 1,
+            "dds_worlds": 1,
+            "double_dummy": True,
+            "opponent": "tenace",
+            "team_b_profile": {"mode": "mock", "project": "broken-caller-override"},
+        },
+    )
+    assert caller_422_match_team_b.status_code == 422
+
+    # 2. Upstream model ValueError inside agent.step / runner.play_match -> 502 Bad Gateway
+    upstream_app = create_app(
+        default_profile=_mock_profile(project="upstream-fails"),
+        default_dds_worlds=1,
+    )
+    upstream_client = TestClient(upstream_app)
+
+    step_502 = upstream_client.post(
+        "/v1/step",
+        json={"seat": "NORTH", "board_number": 1, "tournament_seed": 42},
+    )
+    assert step_502.status_code == 502
+    assert "Upstream model evaluation error" in step_502.json()["detail"]
+
+    match_502 = upstream_client.post(
+        "/v1/match",
+        json={"boards": 1, "dds_worlds": 1, "double_dummy": True},
+    )
+    assert match_502.status_code == 502
+    assert "Upstream model evaluation error" in match_502.json()["detail"]
+
+
+def test_client_cache_reuses_clients_across_turns_and_bounds_lru_size(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_builder = server_mod.build_clients_for_profile
+    built_projects: list[str | None] = []
+
+    def counting_builder(profile: ModelProfile) -> tuple[object, object]:
+        built_projects.append(profile.project)
+        return real_builder(profile)
+
+    monkeypatch.setattr(server_mod, "build_clients_for_profile", counting_builder)
+
+    app = create_app(
+        default_profile=_mock_profile(project="proj-default"),
+        default_dds_worlds=1,
+    )
+    client = TestClient(app)
+
+    # Zero builds at startup or /healthz
+    assert built_projects == []
+    assert client.get("/healthz").status_code == 200
+    assert built_projects == []
+
+    # Repeated /v1/step calls with default profile build clients exactly ONCE
+    for action_hist, seat in (([], "NORTH"), (["Pass"], "EAST")):
+        resp = client.post(
+            "/v1/step",
+            json={
+                "seat": seat,
+                "board_number": 1,
+                "tournament_seed": 42,
+                "action_history": action_hist,
+            },
+        )
+        assert resp.status_code == 200
+    assert built_projects == ["proj-default"]
+
+    # /v1/match with same default profile also reuses the cached client pair!
+    m_resp = client.post(
+        "/v1/match",
+        json={"boards": 1, "dds_worlds": 1, "double_dummy": True},
+    )
+    assert m_resp.status_code == 200
+    assert built_projects == ["proj-default"]
+
+    # Fill >16 distinct profiles to verify bounded LRU eviction (proj-default evicted, then rebuilt)
+    for i in range(17):
+        r = client.post(
+            "/v1/step",
+            json={
+                "seat": "NORTH",
+                "board_number": 1,
+                "tournament_seed": 42,
+                "profile": {"mode": "mock", "project": f"proj-{i}"},
+            },
+        )
+        assert r.status_code == 200
+
+    count_before = len(built_projects)
+    # Most recent profile (proj-16) is still cached -> 0 new builds
+    r_hit = client.post(
+        "/v1/step",
+        json={
+            "seat": "NORTH",
+            "board_number": 1,
+            "tournament_seed": 42,
+            "profile": {"mode": "mock", "project": "proj-16"},
+        },
+    )
+    assert r_hit.status_code == 200
+    assert len(built_projects) == count_before
+
+    # Oldest profile (proj-default) was LRU-evicted -> triggers 1 rebuild
+    r_miss = client.post(
+        "/v1/step",
+        json={"seat": "NORTH", "board_number": 1, "tournament_seed": 42},
+    )
+    assert r_miss.status_code == 200
+    assert len(built_projects) == count_before + 1
+    assert built_projects[-1] == "proj-default"
+
+
+def test_step_rejects_play_prior_strategy_in_auction_and_hidden_seat_contradictions() -> None:
+    app = create_app(default_profile=_mock_profile(), default_dds_worlds=1)
+    client = TestClient(app)
+
+    # 1. Stale prior_strategy with phase='play' submitted during auction phase -> 422
+    stale_play_strategy = StrategyState(
+        phase="play",
+        plan_summary="Stale play plan from another board",
+        revision=2,
+    ).model_dump(mode="json")
+    resp_stale = client.post(
+        "/v1/step",
+        json={
+            "seat": "NORTH",
+            "board_number": 1,
+            "tournament_seed": 42,
+            "action_history": [],
+            "prior_strategy": stale_play_strategy,
+        },
+    )
+    assert resp_stale.status_code == 422
+    assert "phase='play'" in resp_stale.json()["detail"]
+
+    # 2. Hidden-seat double-showout contradiction: both East and West show out of Clubs
+    # while 8 unplayed Clubs (C:5..C:Q) remain outside own_hand and dummy_hand -> 422
+    north_double = [
+        action_label(card_id(Suit.CLUBS, 12)),  # C:A
+        action_label(card_id(Suit.CLUBS, 11)),  # C:K
+        *[action_label(card_id(Suit.HEARTS, r)) for r in range(0, 11)],
+    ]
+    south_double = [
+        action_label(card_id(Suit.CLUBS, 0)),   # C:2
+        action_label(card_id(Suit.CLUBS, 1)),   # C:3
+        *[action_label(card_id(Suit.SPADES, r)) for r in range(0, 11)],
+    ]
+    resp_double_void = client.post(
+        "/v1/step",
+        json={
+            "seat": "NORTH",
+            "board_number": 1,
+            "own_hand": north_double,
+            "dummy_hand": south_double,
+            "action_history": [
+                "1NT", "Pass", "Pass", "Pass",
+                "C:4", "C:2", "D:2", "C:A",  # West shows out of Clubs on Trick 1
+                "C:K", "D:3", "C:3", "D:4",  # East ALSO shows out of Clubs on Trick 2!
+            ],
+        },
+    )
+    assert resp_double_void.status_code == 422
+    assert "both hidden seats showed out" in resp_double_void.json()["detail"]
+
+    # 3. Hidden-seat 13-card capacity overflow: West shows out of both Clubs and Diamonds,
+    # forcing 20 unplayed Clubs+Diamonds into East's remaining 11 card slots -> 422
+    north_cap = [
+        action_label(card_id(Suit.CLUBS, 12)),     # C:A
+        action_label(card_id(Suit.DIAMONDS, 0)),   # D:2
+        *[action_label(card_id(Suit.HEARTS, r)) for r in range(0, 11)],
+    ]
+    south_cap = [
+        action_label(card_id(Suit.CLUBS, 0)),      # C:2
+        action_label(card_id(Suit.DIAMONDS, 12)),  # D:A
+        *[action_label(card_id(Suit.SPADES, r)) for r in range(0, 11)],
+    ]
+    resp_cap = client.post(
+        "/v1/step",
+        json={
+            "seat": "NORTH",
+            "board_number": 1,
+            "own_hand": north_cap,
+            "dummy_hand": south_cap,
+            "action_history": [
+                "1NT", "Pass", "Pass", "Pass",
+                "C:3", "C:2", "H:K", "C:A",  # West shows out of Clubs
+                "D:2", "D:3", "D:A", "S:K",  # West shows out of Diamonds (South wins Trick 2)
+            ],
+        },
+    )
+    assert resp_cap.status_code == 422
+    assert "exceed 13-card capacity" in resp_cap.json()["detail"]
