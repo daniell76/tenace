@@ -158,6 +158,24 @@ def test_terraform_directory_structure_and_docs() -> None:
 
     dev_vars = (REPO_ROOT / "terraform/environments/dev/variables.tf").read_text(encoding="utf-8")
     prod_vars = (REPO_ROOT / "terraform/environments/prod/variables.tf").read_text(encoding="utf-8")
+    mod_vars = (REPO_ROOT / "terraform/modules/tenace_cloudrun/variables.tf").read_text(
+        encoding="utf-8"
+    )
+    assert re.search(
+        r'variable\s+"job_args"\s*\{[^}]*default\s*=\s*\["--boards",\s*"4"\]',
+        mod_vars,
+        re.DOTALL,
+    )
+    assert re.search(
+        r'variable\s+"job_args"\s*\{[^}]*default\s*=\s*\["--boards",\s*"4"\]',
+        dev_vars,
+        re.DOTALL,
+    )
+    assert re.search(
+        r'variable\s+"job_args"\s*\{[^}]*default\s*=\s*\["--boards",\s*"8"\]',
+        prod_vars,
+        re.DOTALL,
+    )
     assert re.search(
         r'variable\s+"deletion_protection"\s*\{[^}]*default\s*=\s*false',
         dev_vars,
@@ -308,6 +326,7 @@ def test_tracked_files_contain_no_sensitive_identifiers() -> None:
     forbidden_regexes = [
         (re.compile(r"\b[a-z][a-z0-9-]{3,23}-\d{6}\b"), "numbered GCP project ID"),
         (re.compile(r"\b[a-z0-9.-]+\.goog\b", re.IGNORECASE), "internal .goog domain"),
+        (re.compile(r"/" + r"google/(?:data|src)/"), "internal /google/{data,src}/ path"),
     ]
 
     for rel_path in tracked_files:

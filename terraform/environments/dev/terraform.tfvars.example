@@ -8,3 +8,4 @@ evaluator_model     = "gemini-decision-1"
 evaluator_location  = "global"
 max_instance_count  = 2
 deletion_protection = false
+job_args            = ["--boards", "4"]

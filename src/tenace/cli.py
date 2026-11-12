@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 import math
 import os
 import re
@@ -333,8 +334,77 @@ class HeuristicMockModelClient:
         )
 
 
-def build_arg_parser() -> argparse.ArgumentParser:
-    default_project = (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip() or None
+def _opt_env(mapping: Mapping[str, str], key: str) -> str | None:
+    raw = mapping.get(key)
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    return stripped if stripped else None
+
+
+def build_arg_parser(env: Mapping[str, str] | None = None) -> argparse.ArgumentParser:
+    mapping = os.environ if env is None else env
+
+    default_project = _opt_env(mapping, "GOOGLE_CLOUD_PROJECT")
+
+    default_mode = _opt_env(mapping, "TENACE_MODE") or "vertex"
+    if default_mode not in ("vertex", "mock"):
+        raise ValueError(
+            f"TENACE_MODE must be 'vertex' or 'mock', got {default_mode!r}"
+        )
+
+    default_strategist_location = _opt_env(mapping, "TENACE_STRATEGIST_LOCATION") or "global"
+    default_strategist_model = (
+        _opt_env(mapping, "TENACE_STRATEGIST_MODEL") or DEFAULT_STRATEGIST_MODEL
+    )
+
+    default_evaluator_backend = _opt_env(mapping, "TENACE_EVALUATOR_BACKEND") or "decisions"
+    if default_evaluator_backend not in ("decisions", "diffusion-gemma", "gemini"):
+        raise ValueError(
+            "TENACE_EVALUATOR_BACKEND must be 'decisions', 'diffusion-gemma', or 'gemini', "
+            f"got {default_evaluator_backend!r}"
+        )
+
+    default_evaluator_location = _opt_env(mapping, "TENACE_EVALUATOR_LOCATION")
+    default_evaluator_model = _opt_env(mapping, "TENACE_EVALUATOR_MODEL")
+    default_evaluator_endpoint_id = _opt_env(mapping, "TENACE_EVALUATOR_ENDPOINT_ID")
+
+    default_decisions_auth = _opt_env(mapping, "TENACE_DECISIONS_AUTH") or "vertex"
+    if default_decisions_auth not in ("vertex", "api-key"):
+        raise ValueError(
+            f"TENACE_DECISIONS_AUTH must be 'vertex' or 'api-key', got {default_decisions_auth!r}"
+        )
+
+    raw_threshold = _opt_env(mapping, "TENACE_DECISIONS_VIOLATION_THRESHOLD")
+    if raw_threshold is None:
+        default_violation_threshold = 0.70
+    else:
+        try:
+            parsed_threshold = float(raw_threshold)
+        except ValueError as exc:
+            raise ValueError(
+                "TENACE_DECISIONS_VIOLATION_THRESHOLD must be a finite number strictly "
+                f"between 0.0 and 1.0, got {raw_threshold!r}"
+            ) from exc
+        default_violation_threshold = _validate_violation_threshold(
+            parsed_threshold,
+            flag_name="TENACE_DECISIONS_VIOLATION_THRESHOLD",
+        )
+
+    raw_dds_worlds = _opt_env(mapping, "TENACE_DDS_WORLDS")
+    if raw_dds_worlds is None:
+        default_dds_worlds = 16
+    else:
+        try:
+            default_dds_worlds = int(raw_dds_worlds)
+        except ValueError as exc:
+            raise ValueError(
+                f"TENACE_DDS_WORLDS must be an integer >= 1, got {raw_dds_worlds!r}"
+            ) from exc
+        if default_dds_worlds < 1:
+            raise ValueError(
+                f"TENACE_DDS_WORLDS must be >= 1, got {default_dds_worlds}"
+            )
 
     parser = argparse.ArgumentParser(
         prog="tenace-match",
@@ -343,8 +413,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--mode",
         choices=["vertex", "mock"],
-        default="vertex",
-        help="Model backend mode: live Vertex AI ('vertex') or offline deterministic ('mock').",
+        default=default_mode,
+        help="Model backend mode: live Vertex AI ('vertex') or offline deterministic ('mock', env: $TENACE_MODE).",
     )
     parser.add_argument(
         "--project",
@@ -353,62 +423,65 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--strategist-location",
-        default="global",
-        help="Vertex AI region for Layer-1 Strategist (default: global).",
+        default=default_strategist_location,
+        help="Vertex AI region for Layer-1 Strategist (default: $TENACE_STRATEGIST_LOCATION or global).",
     )
     parser.add_argument(
         "--strategist-model",
-        default=DEFAULT_STRATEGIST_MODEL,
-        help=f"Vertex AI model name for Layer-1 Strategist (default: {DEFAULT_STRATEGIST_MODEL}).",
+        default=default_strategist_model,
+        help=(
+            "Vertex AI model name for Layer-1 Strategist "
+            f"(default: $TENACE_STRATEGIST_MODEL or {DEFAULT_STRATEGIST_MODEL})."
+        ),
     )
     parser.add_argument(
         "--evaluator-backend",
         choices=["decisions", "diffusion-gemma", "gemini"],
-        default="decisions",
+        default=default_evaluator_backend,
         help=(
             "Layer-2 Evaluator backend: 'decisions' (default, zero-output-token Gemini Decisions API), "
-            "'diffusion-gemma', or 'gemini'."
+            "'diffusion-gemma', or 'gemini' (env: $TENACE_EVALUATOR_BACKEND)."
         ),
     )
     parser.add_argument(
         "--evaluator-location",
-        default=None,
+        default=default_evaluator_location,
         help=(
-            "Vertex AI region for Layer-2 Evaluator (auto-resolves to 'global' for decisions/gemini "
-            "and 'us-central1' for diffusion-gemma when omitted)."
+            "Vertex AI region for Layer-2 Evaluator (defaults to $TENACE_EVALUATOR_LOCATION, "
+            "or auto-resolves to 'global' for decisions/gemini and 'us-central1' for diffusion-gemma)."
         ),
     )
     parser.add_argument(
         "--evaluator-model",
-        default=None,
+        default=default_evaluator_model,
         help=(
-            "Model identifier for Layer-2 Evaluator (auto-resolves per backend: "
-            f"'{DEFAULT_DECISIONS_MODEL}' for decisions, "
+            "Model identifier for Layer-2 Evaluator (defaults to $TENACE_EVALUATOR_MODEL, or auto-resolves "
+            f"per backend: '{DEFAULT_DECISIONS_MODEL}' for decisions, "
             f"'{DEFAULT_DIFFUSION_MODEL}' for diffusion-gemma, or "
-            f"'{DEFAULT_GEMINI_EVALUATOR_MODEL}' for gemini when omitted)."
+            f"'{DEFAULT_GEMINI_EVALUATOR_MODEL}' for gemini)."
         ),
     )
     parser.add_argument(
         "--evaluator-endpoint-id",
-        default=None,
-        help="Optional dedicated Vertex AI Endpoint ID for DiffusionGemma.",
+        default=default_evaluator_endpoint_id,
+        help="Optional dedicated Vertex AI Endpoint ID for DiffusionGemma (env: $TENACE_EVALUATOR_ENDPOINT_ID).",
     )
     parser.add_argument(
         "--decisions-auth",
         choices=["vertex", "api-key"],
-        default="vertex",
+        default=default_decisions_auth,
         help=(
             "Authentication mode for --evaluator-backend decisions: 'vertex' (default) or "
-            "'api-key' (Gemini API v1beta via $GEMINI_API_KEY / $GOOGLE_API_KEY)."
+            "'api-key' (Gemini API v1beta via $GEMINI_API_KEY / $GOOGLE_API_KEY; env: $TENACE_DECISIONS_AUTH)."
         ),
     )
     parser.add_argument(
         "--decisions-violation-threshold",
         type=float,
-        default=0.70,
+        default=default_violation_threshold,
         help=(
             "Probability threshold in (0.0, 1.0) on NoulQuestion P(true) to trigger a "
-            "Layer-1 assumption-violation interrupt (default: 0.70)."
+            "Layer-1 assumption-violation interrupt (default: $TENACE_DECISIONS_VIOLATION_THRESHOLD or 0.70)."
         ),
     )
     parser.add_argument(
@@ -425,7 +498,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Command template with '{port}' placeholder for --opponent bluechip, e.g. "
-            "'wine /google/data/ro/users/lo/locked/wbridge5/Wbridge5.exe Autoconnect {port}'."
+            "'wine /path/to/Wbridge5.exe Autoconnect {port}'."
         ),
     )
     parser.add_argument(
@@ -492,8 +565,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dds-worlds",
         type=int,
-        default=16,
-        help="Number of constrained infostate DDS worlds per candidate rollouts (default: 16).",
+        default=default_dds_worlds,
+        help=(
+            "Number of constrained infostate DDS worlds per candidate rollouts "
+            "(default: $TENACE_DDS_WORLDS or 16)."
+        ),
     )
     parser.add_argument(
         "--double-dummy",

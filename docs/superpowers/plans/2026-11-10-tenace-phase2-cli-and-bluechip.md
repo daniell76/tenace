@@ -523,7 +523,7 @@ tenace-match = "tenace.cli:main"
      - `--strategist-location` (default `"global"`), `--strategist-model` (default `"gemini-2.5-pro"`)
      - `--evaluator-backend {diffusion-gemma,gemini}` (default `"diffusion-gemma"`; `"gemini"` lets users run live Vertex matches immediately with e.g. `gemini-2.5-flash` even before provisioning a DiffusionGemma endpoint!)
      - `--evaluator-location` (default `"us-central1"`), `--evaluator-model` (default `"publishers/google/models/diffusiongemma-26b-a4b-it"`), `--evaluator-endpoint-id` (default `None`)
-     - `--opponent {baseline,bluechip}` (default `"baseline"`), `--bluechip-cmd` (command template containing `{port}`, e.g. `'wine /google/data/ro/users/lo/locked/wbridge5/Wbridge5.exe Autoconnect {port}'`)
+     - `--opponent {baseline,bluechip}` (default `"baseline"`), `--bluechip-cmd` (command template containing `{port}`, e.g. `'wine /path/to/Wbridge5.exe Autoconnect {port}'`)
      - `--boards` (default `4`), `--seed` (default `42`), `--dds-worlds` (default `16`), `--double-dummy` (flag)
    - `format_match_report(summary: MatchSummary, team_a_name: str = "Tenace", team_b_name: str = "Opponent") -> str`: renders header, per-board Open/Closed contracts, auctions, trick count/summary, Strategist revision traces, board IMP swing, total IMP winner banner, and API telemetry summary.
    - `run_cli(argv: list[str] | None = None) -> int` and `main() -> None`.

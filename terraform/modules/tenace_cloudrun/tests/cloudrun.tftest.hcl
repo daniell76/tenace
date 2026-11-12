@@ -53,6 +53,11 @@ run "default_decisions_service_and_job" {
     condition     = google_cloud_run_v2_job.benchmark[0].template[0].template[0].containers[0].command == tolist(["tenace-match"])
     error_message = "Expected benchmark Job container command to be ['tenace-match']."
   }
+
+  assert {
+    condition     = google_cloud_run_v2_job.benchmark[0].template[0].template[0].containers[0].args == tolist(["--boards", "4"])
+    error_message = "Expected default benchmark Job args to be ['--boards', '4'] so TENACE_DDS_WORLDS governs worlds."
+  }
 }
 
 run "diffusion_gemma_endpoint_and_public_invoker" {
@@ -110,6 +115,11 @@ run "decisions_api_key_with_secret_manager" {
   assert {
     condition     = anytrue([for e in google_cloud_run_v2_service.api.template[0].containers[0].env : e.name == "GEMINI_API_KEY"])
     error_message = "Expected GEMINI_API_KEY secret env var on Cloud Run Service container."
+  }
+
+  assert {
+    condition     = anytrue([for e in google_cloud_run_v2_job.benchmark[0].template[0].template[0].containers[0].env : e.name == "GEMINI_API_KEY"])
+    error_message = "Expected GEMINI_API_KEY secret env var on Cloud Run benchmark Job container."
   }
 }
 

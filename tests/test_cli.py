@@ -1056,3 +1056,128 @@ def test_format_match_report_renders_per_team_telemetry_when_team_b_profile_pres
     )
     assert "Tenace-A: strategist_calls=2, evaluator_calls=2, forced_moves=4" in h2h_report
     assert "Tenace-B: strategist_calls=0, evaluator_calls=0, forced_moves=0" in h2h_report
+
+
+def test_cli_honors_tenace_cloudrun_env_vars_and_cli_overrides_and_rejects_invalid(
+    monkeypatch,
+    capsys,
+):
+    # 1. All TENACE_* env vars populate build_arg_parser() defaults when CLI flags are omitted
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "env-gcp-proj")
+    monkeypatch.setenv("TENACE_MODE", "mock")
+    monkeypatch.setenv("TENACE_STRATEGIST_LOCATION", "us-east5")
+    monkeypatch.setenv("TENACE_STRATEGIST_MODEL", "gemini-4-carbon")
+    monkeypatch.setenv("TENACE_EVALUATOR_BACKEND", "diffusion-gemma")
+    monkeypatch.setenv("TENACE_EVALUATOR_LOCATION", "us-central1")
+    monkeypatch.setenv("TENACE_EVALUATOR_MODEL", "publishers/google/models/diffusiongemma-26b-a4b-it")
+    monkeypatch.setenv("TENACE_EVALUATOR_ENDPOINT_ID", "ep-env-77")
+    monkeypatch.setenv("TENACE_DECISIONS_AUTH", "vertex")
+    monkeypatch.setenv("TENACE_DECISIONS_VIOLATION_THRESHOLD", "0.81")
+    monkeypatch.setenv("TENACE_DDS_WORLDS", "3")
+
+    env_args = build_arg_parser().parse_args([])
+    assert env_args.project == "env-gcp-proj"
+    assert env_args.mode == "mock"
+    assert env_args.strategist_location == "us-east5"
+    assert env_args.strategist_model == "gemini-4-carbon"
+    assert env_args.evaluator_backend == "diffusion-gemma"
+    assert env_args.evaluator_location == "us-central1"
+    assert env_args.evaluator_model == "publishers/google/models/diffusiongemma-26b-a4b-it"
+    assert env_args.evaluator_endpoint_id == "ep-env-77"
+    assert env_args.decisions_auth == "vertex"
+    assert env_args.decisions_violation_threshold == pytest.approx(0.81)
+    assert env_args.dds_worlds == 3
+
+    # run_cli executes end-to-end using TENACE_* env vars when CLI model/world flags are omitted
+    rc = run_cli(["--boards", "1", "--double-dummy"])
+    assert rc == 0
+    report_out = capsys.readouterr().out
+    assert "mock | L1:gemini-4-carbon | L2:diffusion-gemma/endpoint:ep-env-77" in report_out
+
+    # 2. Explicit CLI flags override TENACE_* env vars
+    monkeypatch.delenv("TENACE_EVALUATOR_ENDPOINT_ID", raising=False)
+    override_args = build_arg_parser().parse_args(
+        [
+            "--mode",
+            "vertex",
+            "--project",
+            "cli-proj",
+            "--strategist-location",
+            "global",
+            "--strategist-model",
+            "gemini-2.5-pro",
+            "--evaluator-backend",
+            "decisions",
+            "--evaluator-location",
+            "global",
+            "--evaluator-model",
+            "gemini-decision-exp",
+            "--decisions-auth",
+            "api-key",
+            "--decisions-violation-threshold",
+            "0.64",
+            "--dds-worlds",
+            "12",
+        ]
+    )
+    assert override_args.mode == "vertex"
+    assert override_args.project == "cli-proj"
+    assert override_args.strategist_location == "global"
+    assert override_args.strategist_model == "gemini-2.5-pro"
+    assert override_args.evaluator_backend == "decisions"
+    assert override_args.evaluator_location == "global"
+    assert override_args.evaluator_model == "gemini-decision-exp"
+    assert override_args.decisions_auth == "api-key"
+    assert override_args.decisions_violation_threshold == pytest.approx(0.64)
+    assert override_args.dds_worlds == 12
+
+    # 3. Blank/whitespace TENACE_* env vars fall back to standard defaults
+    for env_key in (
+        "GOOGLE_CLOUD_PROJECT",
+        "TENACE_MODE",
+        "TENACE_STRATEGIST_LOCATION",
+        "TENACE_STRATEGIST_MODEL",
+        "TENACE_EVALUATOR_BACKEND",
+        "TENACE_EVALUATOR_LOCATION",
+        "TENACE_EVALUATOR_MODEL",
+        "TENACE_EVALUATOR_ENDPOINT_ID",
+        "TENACE_DECISIONS_AUTH",
+        "TENACE_DECISIONS_VIOLATION_THRESHOLD",
+        "TENACE_DDS_WORLDS",
+    ):
+        monkeypatch.setenv(env_key, "   ")
+
+    blank_args = build_arg_parser().parse_args([])
+    assert blank_args.project is None
+    assert blank_args.mode == "vertex"
+    assert blank_args.strategist_location == "global"
+    assert blank_args.strategist_model == "gemini-4-argon"
+    assert blank_args.evaluator_backend == "decisions"
+    assert blank_args.evaluator_location is None
+    assert blank_args.evaluator_model is None
+    assert blank_args.evaluator_endpoint_id is None
+    assert blank_args.decisions_auth == "vertex"
+    assert blank_args.decisions_violation_threshold == pytest.approx(0.70)
+    assert blank_args.dds_worlds == 16
+
+    # 4. Invalid TENACE_* env vars raise ValueError
+    invalid_env_cases = [
+        ("TENACE_MODE", "invalid-mode", "TENACE_MODE"),
+        ("TENACE_EVALUATOR_BACKEND", "unknown-backend", "TENACE_EVALUATOR_BACKEND"),
+        ("TENACE_DECISIONS_AUTH", "oauth-magic", "TENACE_DECISIONS_AUTH"),
+        ("TENACE_DECISIONS_VIOLATION_THRESHOLD", "not-a-float", "TENACE_DECISIONS_VIOLATION_THRESHOLD"),
+        ("TENACE_DECISIONS_VIOLATION_THRESHOLD", "0.0", "TENACE_DECISIONS_VIOLATION_THRESHOLD"),
+        ("TENACE_DECISIONS_VIOLATION_THRESHOLD", "1.0", "TENACE_DECISIONS_VIOLATION_THRESHOLD"),
+        ("TENACE_DECISIONS_VIOLATION_THRESHOLD", "nan", "TENACE_DECISIONS_VIOLATION_THRESHOLD"),
+        ("TENACE_DDS_WORLDS", "not-an-int", "TENACE_DDS_WORLDS"),
+        ("TENACE_DDS_WORLDS", "0", "TENACE_DDS_WORLDS"),
+        ("TENACE_DDS_WORLDS", "-4", "TENACE_DDS_WORLDS"),
+    ]
+    for env_key, bad_val, expected_msg in invalid_env_cases:
+        monkeypatch.setenv(env_key, bad_val)
+        with pytest.raises(ValueError, match=expected_msg):
+            build_arg_parser()
+        with pytest.raises(ValueError, match=expected_msg):
+            run_cli([])
+        monkeypatch.delenv(env_key, raising=False)
+

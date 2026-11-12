@@ -142,7 +142,7 @@ curl -sS -X POST "${SERVICE_URL}/v1/match" \
 
 ### Executing Batch WBF Duplicate Benchmarks (`Cloud Run Job`)
 
-For multi-board benchmarks without HTTP request timeouts, trigger the companion Cloud Run Job (`tenace-bench-dev` or `tenace-bench-prod`):
+For multi-board benchmarks without HTTP request timeouts, trigger the companion Cloud Run Job (`tenace-bench-dev` or `tenace-bench-prod`). Both `tenace-serve` and `tenace-match` share the same `TENACE_*` model and `TENACE_DDS_WORLDS` environment variables injected by Terraform (`job_args` defaults to `["--boards", "4"]` in `dev` and `["--boards", "8"]` in `prod`):
 
 ```bash
 gcloud run jobs execute tenace-bench-dev \

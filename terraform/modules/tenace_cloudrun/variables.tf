@@ -304,9 +304,9 @@ variable "job_max_retries" {
 }
 
 variable "job_args" {
-  description = "Default CLI arguments passed to `tenace-match` in the Cloud Run benchmark Job."
+  description = "Default CLI arguments passed to `tenace-match` in the Cloud Run benchmark Job (DDS worlds default from TENACE_DDS_WORLDS)."
   type        = list(string)
-  default     = ["--boards", "4", "--dds-worlds", "16"]
+  default     = ["--boards", "4"]
 }
 
 variable "labels" {
