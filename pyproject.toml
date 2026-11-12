@@ -13,15 +13,19 @@ dependencies = [
     "numpy>=2.0.0",
     "google-genai>=3.2.0",
     "google-cloud-aiplatform>=1.84.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.32.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.3.0",
+    "httpx>=0.28.0",
 ]
 
 [project.scripts]
 tenace-match = "tenace.cli:main"
+tenace-serve = "tenace.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tenace"]

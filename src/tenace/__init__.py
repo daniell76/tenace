@@ -15,6 +15,7 @@ from tenace.models import (
     GeminiDecisionsClient,
     VertexGeminiClient,
 )
+from tenace.server import create_app
 
 __all__ = [
     "BlueChipLineTransport",
@@ -31,4 +32,5 @@ __all__ = [
     "TacticalOptionEvaluator",
     "TenaceAgent",
     "VertexGeminiClient",
+    "create_app",
 ]
