@@ -504,12 +504,12 @@ def test_cli_parser_defaults_to_vertex_and_gcp_env(monkeypatch):
         == "mock | L1:gemini-4-argon | L2:decisions/gemini-decision-1"
     )
 
-    # Unset or empty GOOGLE_CLOUD_PROJECT falls back to your-gcp-project-id
+    # Unset or empty GOOGLE_CLOUD_PROJECT defaults to None (resolved via ADC or --project)
     monkeypatch.delenv("GOOGLE_CLOUD_PROJECT", raising=False)
-    assert build_arg_parser().parse_args([]).project == "your-gcp-project-id"
+    assert build_arg_parser().parse_args([]).project is None
 
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "")
-    assert build_arg_parser().parse_args([]).project == "your-gcp-project-id"
+    assert build_arg_parser().parse_args([]).project is None
 
 
 def test_cli_vertex_mode_wires_gemini_and_diffusion_gemma_clients(monkeypatch):
@@ -1026,7 +1026,7 @@ def test_model_profile_strips_strings_and_rejects_blank_values(monkeypatch):
             ModelProfile(evaluator_backend="diffusion-gemma", evaluator_endpoint_id=blank)
 
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "   ")
-    assert build_arg_parser().parse_args([]).project == "your-gcp-project-id"
+    assert build_arg_parser().parse_args([]).project is None
 
 
 def test_format_match_report_renders_per_team_telemetry_when_team_b_profile_present_even_with_zero_activity():

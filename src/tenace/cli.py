@@ -35,7 +35,6 @@ from tenace.models.clients import (
 
 T = TypeVar("T", bound=BaseModel)
 
-DEFAULT_GCP_PROJECT = "your-gcp-project-id"
 DEFAULT_STRATEGIST_MODEL = "gemini-4-argon"
 DEFAULT_DECISIONS_MODEL = "gemini-decision-1"
 DEFAULT_DIFFUSION_MODEL = "publishers/google/models/diffusiongemma-26b-a4b-it"
@@ -124,7 +123,7 @@ class ModelProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: Literal["vertex", "mock"] = "vertex"
-    project: str | None = DEFAULT_GCP_PROJECT
+    project: str | None = None
     strategist_location: str = "global"
     strategist_model: str = DEFAULT_STRATEGIST_MODEL
     evaluator_backend: Literal["decisions", "diffusion-gemma", "gemini"] = "decisions"
@@ -335,7 +334,7 @@ class HeuristicMockModelClient:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    default_project = (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip() or DEFAULT_GCP_PROJECT
+    default_project = (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip() or None
 
     parser = argparse.ArgumentParser(
         prog="tenace-match",
