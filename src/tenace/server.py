@@ -8,9 +8,19 @@ import threading
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
+from google.api_core import exceptions as gcp_exceptions
+from google.genai import errors as genai_errors
+from google.genai._gaos.lib import compat_errors
 import pyspiel
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 import uvicorn
+
+_UPSTREAM_MODEL_ERRORS: tuple[type[Exception], ...] = (
+    ValueError,
+    genai_errors.APIError,
+    compat_errors.GeminiNextGenAPIClientError,
+    gcp_exceptions.GoogleAPIError,
+)
 
 from tenace.agent import TenaceAgent
 from tenace.cli import (
@@ -714,8 +724,9 @@ def create_app(
         description="Stateless 3-Layer Neuro-Symbolic Contract Bridge HTTP API.",
     )
 
+    @app.get("/health")
     @app.get("/healthz")
-    async def healthz() -> dict[str, Any]:
+    async def health() -> dict[str, Any]:
         return {
             "status": "ok",
             "service": "tenace",
@@ -762,7 +773,7 @@ def create_app(
         )
         try:
             chosen_action = agent.step(state)
-        except ValueError as exc:
+        except _UPSTREAM_MODEL_ERRORS as exc:
             raise HTTPException(
                 status_code=502,
                 detail=f"Upstream model evaluation error: {exc}",
@@ -847,7 +858,7 @@ def create_app(
                 team_b_factory=team_b_factory,
                 num_boards=req.boards,
             )
-        except ValueError as exc:
+        except _UPSTREAM_MODEL_ERRORS as exc:
             raise HTTPException(
                 status_code=502,
                 detail=f"Upstream model evaluation error: {exc}",

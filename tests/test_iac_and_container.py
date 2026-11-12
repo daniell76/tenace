@@ -202,7 +202,7 @@ def test_terraform_directory_structure_and_docs() -> None:
     for doc_text in (tf_readme, root_readme):
         assert "your-gcp-project-id" in doc_text
         assert "gcloud builds submit" in doc_text
-        assert "/healthz" in doc_text
+        assert "/health" in doc_text
         assert "/v1/step" in doc_text
         assert "/v1/match" in doc_text
         assert "gcloud run jobs execute" in doc_text

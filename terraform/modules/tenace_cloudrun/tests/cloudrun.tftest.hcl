@@ -58,6 +58,16 @@ run "default_decisions_service_and_job" {
     condition     = google_cloud_run_v2_job.benchmark[0].template[0].template[0].containers[0].args == tolist(["--boards", "4"])
     error_message = "Expected default benchmark Job args to be ['--boards', '4'] so TENACE_DDS_WORLDS governs worlds."
   }
+
+  assert {
+    condition     = google_cloud_run_v2_service.api.template[0].containers[0].startup_probe[0].http_get[0].path == "/health"
+    error_message = "Expected Cloud Run Service startup_probe path to be GFE-safe '/health'."
+  }
+
+  assert {
+    condition     = google_cloud_run_v2_service.api.template[0].containers[0].liveness_probe[0].http_get[0].path == "/health"
+    error_message = "Expected Cloud Run Service liveness_probe path to be GFE-safe '/health'."
+  }
 }
 
 run "diffusion_gemma_endpoint_and_public_invoker" {

@@ -157,7 +157,7 @@ TENACE_MODE=mock uv run tenace-serve
 
 ### Stateless HTTP API Endpoints
 
-- `GET /healthz`: Readiness/liveness check returning service version, execution mode, `dds_worlds`, and active default `ModelProfile`.
+- `GET /health` (and `/healthz`): Readiness/liveness check returning service version, execution mode, `dds_worlds`, and active default `ModelProfile` (use `/health` on external Cloud Run `*.run.app` URLs).
 - `POST /v1/step`: Selects the next legal bid or card for a single seat using either imperfect-information hands (`own_hand` + optional post-lead `dummy_hand` + `action_history`) or a deterministic benchmark board (`tournament_seed` + `board_number` + `action_history`). Accepts and returns `StrategyState` (`prior_strategy` -> `strategy`) so horizontally autoscaled Cloud Run instances preserve Layer-1 Strategist caching across turns with zero sticky state.
 - `POST /v1/match`: Runs a synchronous two-room WBF Duplicate IMP match (`baseline` or head-to-head `tenace` model comparison) and returns structured IMP results, telemetry, and scorecard text.
 
@@ -198,7 +198,7 @@ SERVICE_URL="$(terraform -chdir=terraform/environments/dev output -raw service_u
 AUTH_HEADER="Authorization: Bearer $(gcloud auth print-identity-token)"
 
 # Readiness & active ModelProfile
-curl -sS -H "${AUTH_HEADER}" "${SERVICE_URL}/healthz"
+curl -sS -H "${AUTH_HEADER}" "${SERVICE_URL}/health"
 
 # Single-seat imperfect-information bid/play decision
 curl -sS -X POST "${SERVICE_URL}/v1/step" \

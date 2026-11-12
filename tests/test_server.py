@@ -1075,3 +1075,61 @@ def test_step_rejects_play_prior_strategy_in_auction_and_hidden_seat_contradicti
     )
     assert resp_cap.status_code == 422
     assert "exceed 13-card capacity" in resp_cap.json()["detail"]
+
+
+def test_gfe_safe_health_route_and_upstream_sdk_errors_map_to_502(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from google.genai import errors as genai_errors
+    from google.genai._gaos.lib import compat_errors
+
+    app = create_app(default_profile=_mock_profile(), default_dds_worlds=1)
+    client = TestClient(app)
+
+    # Cloud Run GFE reserves /*z externally, so /health MUST work identically to /healthz
+    r_health = client.get("/health")
+    r_healthz = client.get("/healthz")
+    assert r_health.status_code == 200
+    assert r_health.json() == r_healthz.json()
+
+    # Upstream google-genai _gaos GeminiNextGenAPIClientError / APIError -> structured 502 JSON
+    class FailingGaosClient:
+        def generate_structured(self, system_prompt: str, user_prompt: str, schema: type) -> object:
+            raise compat_errors.GeminiNextGenAPIClientError("Method not found (404)")
+
+    class FailingGenaiClient:
+        def generate_structured(self, system_prompt: str, user_prompt: str, schema: type) -> object:
+            raise genai_errors.APIError(404, {"error": {"message": "Model not found"}})
+
+    monkeypatch.setattr(
+        server_mod,
+        "build_clients_for_profile",
+        lambda profile: (
+            (FailingGaosClient(), FailingGaosClient())
+            if profile.project == "gaos-err"
+            else (FailingGenaiClient(), FailingGenaiClient())
+        ),
+    )
+
+    err_client = TestClient(
+        create_app(default_profile=_mock_profile(project="gaos-err"), default_dds_worlds=1),
+        raise_server_exceptions=False,
+    )
+    step_gaos = err_client.post(
+        "/v1/step",
+        json={"seat": "NORTH", "board_number": 1, "tournament_seed": 42},
+    )
+    assert step_gaos.status_code == 502
+    assert "Method not found" in step_gaos.json()["detail"]
+
+    match_genai = err_client.post(
+        "/v1/match",
+        json={
+            "boards": 1,
+            "dds_worlds": 1,
+            "double_dummy": True,
+            "team_a_profile": {"mode": "mock", "project": "genai-err"},
+        },
+    )
+    assert match_genai.status_code == 502
+    assert "Upstream model evaluation error" in match_genai.json()["detail"]

@@ -106,14 +106,14 @@ terraform -chdir=terraform/environments/prod apply \
 
 By default, `allow_unauthenticated = false` so Cloud Run enforces IAM authentication (`roles/run.invoker`).
 
-### Authenticated HTTP Endpoints (`/healthz`, `/v1/step`, `/v1/match`)
+### Authenticated HTTP Endpoints (`/health`, `/v1/step`, `/v1/match`)
 
 ```bash
 SERVICE_URL="$(terraform -chdir=terraform/environments/dev output -raw service_uri)"
 AUTH_HEADER="Authorization: Bearer $(gcloud auth print-identity-token)"
 
 # 1. Health & active ModelProfile check
-curl -sS -H "${AUTH_HEADER}" "${SERVICE_URL}/healthz"
+curl -sS -H "${AUTH_HEADER}" "${SERVICE_URL}/health"
 
 # 2. Stateless single-turn action selection (/v1/step)
 #    Supports imperfect-information own_hand (+ post-lead dummy_hand & prior_strategy)
