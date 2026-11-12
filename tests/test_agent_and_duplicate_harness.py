@@ -14,9 +14,12 @@ import tenace.harness.scoring as scoring_mod
 from tenace import (
     SAYC_CONVENTION_CARD,
     DiffusionGemmaClient,
+    DiffusionOptionEvaluator,
     DuplicateMatchRunner,
+    GeminiDecisionsClient,
     RoomTranscript,
     Seat,
+    TacticalOptionEvaluator,
     TenaceAgent,
     VertexGeminiClient,
 )
@@ -98,10 +101,13 @@ def test_public_exports_for_agent_harness_and_top_level_package():
     assert set(agent_mod.__all__) >= {"TenaceAgent"}
     assert set(tenace.__all__) >= {
         "DiffusionGemmaClient",
+        "DiffusionOptionEvaluator",
         "DuplicateMatchRunner",
+        "GeminiDecisionsClient",
         "RoomTranscript",
         "SAYC_CONVENTION_CARD",
         "Seat",
+        "TacticalOptionEvaluator",
         "TenaceAgent",
         "VertexGeminiClient",
     }
@@ -112,7 +118,10 @@ def test_public_exports_for_agent_harness_and_top_level_package():
     assert HarnessRoomTranscript is RoomTranscript
     assert duplicate_mod.RoomTranscript is RoomTranscript
     assert tenace.VertexGeminiClient is VertexGeminiClient
+    assert tenace.GeminiDecisionsClient is GeminiDecisionsClient
     assert tenace.DiffusionGemmaClient is DiffusionGemmaClient
+    assert tenace.TacticalOptionEvaluator is TacticalOptionEvaluator
+    assert tenace.DiffusionOptionEvaluator is DiffusionOptionEvaluator
     assert tenace.SAYC_CONVENTION_CARD is SAYC_CONVENTION_CARD
 
 

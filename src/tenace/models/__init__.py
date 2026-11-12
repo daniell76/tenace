@@ -1,6 +1,7 @@
 from tenace.models.clients import (
     DiffusionGemmaClient,
     DiffusionSamplingConfig,
+    GeminiDecisionsClient,
     StructuredModelClient,
     VertexGeminiClient,
     extract_json_object,
@@ -9,6 +10,7 @@ from tenace.models.clients import (
 __all__ = [
     "DiffusionGemmaClient",
     "DiffusionSamplingConfig",
+    "GeminiDecisionsClient",
     "StructuredModelClient",
     "VertexGeminiClient",
     "extract_json_object",

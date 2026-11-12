@@ -8,7 +8,7 @@ from tenace.layer1_strategist import (
     ConventionCard,
     StrategistEngine,
 )
-from tenace.layer2_evaluator import DiffusionOptionEvaluator
+from tenace.layer2_evaluator import TacticalOptionEvaluator
 from tenace.layer3_rules import (
     RuleDDSEvaluator,
     RuleFactTracker,
@@ -36,7 +36,7 @@ class TenaceAgent:
             client=strategist_client,
             convention_card=convention_card,
         )
-        self.evaluator = DiffusionOptionEvaluator(client=evaluator_client)
+        self.evaluator = TacticalOptionEvaluator(client=evaluator_client)
         self.dds_evaluator = (
             dds_evaluator if dds_evaluator is not None else RuleDDSEvaluator()
         )

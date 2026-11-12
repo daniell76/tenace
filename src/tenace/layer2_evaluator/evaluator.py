@@ -15,10 +15,10 @@ from tenace.layer1_strategist import (
 from tenace.layer3_rules.tracker import BoardFactSnapshot
 from tenace.models.clients import StructuredModelClient
 
-__all__ = ["DiffusionOptionEvaluator"]
+__all__ = ["DiffusionOptionEvaluator", "TacticalOptionEvaluator"]
 
 
-class DiffusionOptionEvaluator:
+class TacticalOptionEvaluator:
     def __init__(self, client: StructuredModelClient) -> None:
         self.client = client
 
@@ -34,7 +34,7 @@ class DiffusionOptionEvaluator:
             raise ValueError("candidates must be non-empty")
 
         system_prompt = (
-            "You are Tenace Layer 2 Tactical Option Evaluator (powered by DiffusionGemma).\n"
+            "You are Tenace Layer 2 Tactical Option Evaluator.\n"
             "Score each legal candidate action in [0.0, 1.0] under `option_scores` keyed by "
             "the exact candidate label, balancing Layer 1 strategic goals with Layer 3 "
             "double-dummy baseline EV and make probability.\n"
@@ -105,8 +105,19 @@ class DiffusionOptionEvaluator:
         )
         user_prompt = "\n".join(user_lines)
 
+        direct_eval = getattr(self.client, "evaluate_options", None)
+        if callable(direct_eval):
+            return direct_eval(
+                context_text=user_prompt,
+                candidates=candidates,
+                has_assumptions=bool(strategy.assumptions),
+            )
+
         return self.client.generate_structured(
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             schema=TacticalDecision,
         )
+
+
+DiffusionOptionEvaluator = TacticalOptionEvaluator

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any, TypeVar
 
 import pytest
@@ -33,9 +34,10 @@ from tenace.layer1_strategist import (
 )
 from tenace.layer1_strategist.conventions import __all__ as conventions_all
 from tenace.layer1_strategist.strategist import __all__ as strategist_all
-from tenace.layer2_evaluator import DiffusionOptionEvaluator
+from tenace.layer2_evaluator import DiffusionOptionEvaluator, TacticalOptionEvaluator
 from tenace.layer2_evaluator.evaluator import __all__ as evaluator_all
 from tenace.layer3_rules.tracker import BoardFactSnapshot
+from tenace.models import GeminiDecisionsClient
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -125,8 +127,13 @@ def test_public_exports_for_layer1_and_layer2():
     assert ({"ConventionCard", "SAYC_CONVENTION_CARD"} | expected_strategist_exports).issubset(
         set(layer1_pkg.__all__)
     )
-    assert {"DiffusionOptionEvaluator"}.issubset(set(evaluator_all))
-    assert {"DiffusionOptionEvaluator"}.issubset(set(layer2_pkg.__all__))
+    assert {"DiffusionOptionEvaluator", "TacticalOptionEvaluator"}.issubset(
+        set(evaluator_all)
+    )
+    assert {"DiffusionOptionEvaluator", "TacticalOptionEvaluator"}.issubset(
+        set(layer2_pkg.__all__)
+    )
+    assert DiffusionOptionEvaluator is TacticalOptionEvaluator
 
 
 def test_format_contract_summary_doubled_and_redoubled():
@@ -600,3 +607,87 @@ def test_layer2_evaluator_rejects_empty_candidates_and_terminal_phase():
     )
     with pytest.raises(ValueError, match="terminal"):
         evaluator.evaluate(terminal_facts, strategy, [cand])
+
+
+def test_tactical_option_evaluator_uses_direct_evaluate_options_with_gemini_decisions_client():
+    decision_requests: list[dict[str, Any]] = []
+
+    def fake_create(*, model: str, input: Any, questions: dict[str, Any]) -> Any:
+        decision_requests.append({"model": model, "input": input, "questions": questions})
+        ans: dict[str, Any] = {
+            "cand_0": {"type": "score", "score": 3.6, "confidence": 0.90},
+            "cand_1": {"type": "score", "score": 1.2, "confidence": 0.80},
+        }
+        if "assumption_violated" in questions:
+            ans["assumption_violated"] = {"type": "noul", "noul": 0.82, "confidence": 0.82}
+        return SimpleNamespace(answers=ans)
+
+    decisions_client = GeminiDecisionsClient(
+        genai_client=SimpleNamespace(decisions=SimpleNamespace(create=fake_create))
+    )
+    evaluator = TacticalOptionEvaluator(decisions_client)
+
+    facts = _make_facts(
+        observer=Seat.SOUTH,
+        phase="play",
+        dummy_seat=Seat.NORTH,
+        dummy_cards=[card_id(Suit.SPADES, 10)],
+        declarer=Seat.SOUTH,
+        trump_denom=3,
+        contract_level=4,
+    )
+    cands = [
+        CandidateOption(
+            action=card_id(Suit.SPADES, 12),
+            label="S:A",
+            equivalent_actions=[card_id(Suit.SPADES, 12)],
+            baseline_ev=420.0,
+            make_prob=0.85,
+        ),
+        CandidateOption(
+            action=card_id(Suit.CLUBS, 5),
+            label="C:7",
+            equivalent_actions=[card_id(Suit.CLUBS, 5)],
+            baseline_ev=-50.0,
+            make_prob=0.35,
+        ),
+    ]
+
+    # With assumptions -> evaluates assumption_violated NoulQuestion and flags interrupt
+    strat_with_assumptions = StrategyState(
+        phase="play",
+        plan_summary="Draw trumps",
+        assumptions=[Assumption(claim="Spades 3-2", confidence=0.68)],
+        revision=1,
+    )
+    res_violated = evaluator.evaluate(facts, strat_with_assumptions, cands)
+    assert res_violated.assumption_violated is True
+    assert "0.82" in res_violated.violation_reason
+    assert res_violated.option_scores == pytest.approx({"S:A": 0.90, "C:7": 0.30})
+    assert "=== Board Facts ===" in decision_requests[0]["input"]
+    assert "Acting Hand: Own (SOUTH)" in decision_requests[0]["input"]
+    assert set(decision_requests[0]["questions"].keys()) == {
+        "cand_0",
+        "cand_1",
+        "assumption_violated",
+    }
+
+    # Without assumptions -> passes has_assumptions=False and omits assumption_violated
+    strat_no_assumptions = StrategyState(
+        phase="play",
+        plan_summary="Cash winners",
+        assumptions=[],
+        revision=2,
+    )
+    res_clean = evaluator.evaluate(facts, strat_no_assumptions, cands)
+    assert res_clean.assumption_violated is False
+    assert set(decision_requests[1]["questions"].keys()) == {"cand_0", "cand_1"}
+
+    # StructuredModelClient fallback uses model-neutral system_prompt
+    structured_client = RecordingStructuredClient([res_clean])
+    fallback_evaluator = TacticalOptionEvaluator(structured_client)
+    fallback_evaluator.evaluate(facts, strat_no_assumptions, cands)
+    sys_prompt = structured_client.calls[0]["system_prompt"]
+    assert sys_prompt.startswith("You are Tenace Layer 2 Tactical Option Evaluator.\n")
+    assert "DiffusionGemma" not in sys_prompt
+

@@ -1,18 +1,31 @@
 from __future__ import annotations
 
 import json
+import math
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from google.genai import _api_client, models as genai_models, types as genai_types
+from google.genai import (
+    _api_client,
+    decisions as genai_decisions,
+    models as genai_models,
+    types as genai_types,
+)
 from pydantic import BaseModel, ValidationError
 
 import tenace.models as models
-from tenace.domain.types import Seat, StrategyState, Suit, TacticalDecision
+from tenace.domain.types import (
+    CandidateOption,
+    Seat,
+    StrategyState,
+    Suit,
+    TacticalDecision,
+)
 from tenace.models import (
     DiffusionGemmaClient,
     DiffusionSamplingConfig,
+    GeminiDecisionsClient,
     StructuredModelClient,
     VertexGeminiClient,
     extract_json_object,
@@ -24,6 +37,7 @@ def test_models_package_reexports():
     expected = {
         "StructuredModelClient",
         "VertexGeminiClient",
+        "GeminiDecisionsClient",
         "DiffusionSamplingConfig",
         "DiffusionGemmaClient",
         "extract_json_object",
@@ -462,4 +476,296 @@ def test_diffusion_gemma_rejects_ambiguous_client_configuration(monkeypatch: pyt
     assert created_endpoints == [
         {"endpoint_name": "987654321", "project": "bridge-proj", "location": "us-central1"}
     ]
+
+
+def test_gemini_decisions_client_evaluates_options_with_real_sdk_types_and_normalizes_scores():
+    calls: list[dict[str, Any]] = []
+
+    def fake_create(*, model: str, input: Any, questions: dict[str, Any]) -> Any:
+        # Validate outgoing payload against real google.genai.decisions Pydantic request schema
+        validated_req = genai_decisions.CreateDecisionRequest.model_validate(
+            {"model": model, "input": input, "questions": questions}
+        )
+        calls.append(
+            {
+                "model": model,
+                "input": input,
+                "questions": questions,
+                "validated_req": validated_req,
+            }
+        )
+        answers: dict[str, Any] = {
+            "cand_0": genai_decisions.ScoreAnswer(
+                score=3.6,
+                confidence=0.82,
+                legend={"0": "bad", "4": "best"},
+                probabilities={"0": 0.0, "1": 0.0, "2": 0.0, "3": 0.4, "4": 0.6},
+            ),
+            "cand_1": genai_decisions.ScoreAnswer(
+                score=4.2,  # Clamped to 1.0 if slightly above 4.0
+                confidence=0.91,
+                legend={"0": "bad", "4": "best"},
+                probabilities={"0": 0.0, "1": 0.0, "2": 0.0, "3": 0.0, "4": 1.0},
+            ),
+            "cand_2": genai_decisions.ScoreAnswer(
+                score=1.0,
+                confidence=0.70,
+                legend={"0": "bad", "4": "best"},
+                probabilities={"0": 0.2, "1": 0.6, "2": 0.2, "3": 0.0, "4": 0.0},
+            ),
+        }
+        if "assumption_violated" in questions:
+            answers["assumption_violated"] = genai_decisions.NoulAnswer(
+                noul=0.18,
+                confidence=0.82,
+            )
+        return genai_decisions.CreateDecisionResponse(answers=answers)
+
+    fake_genai = SimpleNamespace(decisions=SimpleNamespace(create=fake_create))
+    client = GeminiDecisionsClient(genai_client=fake_genai)
+    assert client.model == "gemini-decision-1"
+    assert client.violation_threshold == pytest.approx(0.70)
+    assert isinstance(client, StructuredModelClient)
+
+    candidates = [
+        CandidateOption(action=51, label="S:A", baseline_ev=420.0, make_prob=0.85),
+        CandidateOption(action=59, label="1NT", baseline_ev=120.0, make_prob=0.62),
+        CandidateOption(action=20, label="C:7", baseline_ev=-50.0, make_prob=None),
+    ]
+
+    # Case 1: has_assumptions=True -> includes "assumption_violated" NoulQuestion
+    res_with_assumptions = client.evaluate_options(
+        context_text="=== Board Facts ===\nObserver: SOUTH",
+        candidates=candidates,
+        has_assumptions=True,
+    )
+    assert len(calls) == 1
+    q_map = calls[0]["questions"]
+    assert set(q_map.keys()) == {"cand_0", "cand_1", "cand_2", "assumption_violated"}
+    for q_id in ("cand_0", "cand_1", "cand_2"):
+        assert q_map[q_id]["type"] == "score"
+        assert len(q_map[q_id]["criteria"]) == 5
+    assert "S:A" in q_map["cand_0"]["instructions"]
+    assert "baseline_ev=420.0" in q_map["cand_0"]["instructions"]
+    assert "make_prob=0.85" in q_map["cand_0"]["instructions"]
+    assert "make_prob=N/A" in q_map["cand_2"]["instructions"]
+    assert q_map["assumption_violated"]["type"] == "noul"
+    assert "true_description" in q_map["assumption_violated"]["criteria"]
+    assert "false_description" in q_map["assumption_violated"]["criteria"]
+
+    assert res_with_assumptions.assumption_violated is False
+    assert res_with_assumptions.violation_reason == ""
+    assert res_with_assumptions.option_scores == pytest.approx(
+        {"S:A": 0.90, "1NT": 1.0, "C:7": 0.25}
+    )
+    assert "1NT" in res_with_assumptions.rationale
+    assert "0.18" in res_with_assumptions.rationale
+
+    # Case 2: has_assumptions=False -> omits "assumption_violated"
+    res_no_assumptions = client.evaluate_options(
+        context_text="=== Board Facts ===\nObserver: SOUTH",
+        candidates=candidates[:2],
+        has_assumptions=False,
+    )
+    assert set(calls[1]["questions"].keys()) == {"cand_0", "cand_1"}
+    assert res_no_assumptions.assumption_violated is False
+    assert res_no_assumptions.violation_reason == ""
+    assert res_no_assumptions.option_scores == pytest.approx({"S:A": 0.90, "1NT": 1.0})
+
+
+def test_gemini_decisions_client_triggers_violation_interrupt_and_accepts_dict_answers():
+    def fake_create(*, model: str, input: Any, questions: dict[str, Any]) -> Any:
+        return SimpleNamespace(
+            answers={
+                "cand_0": {"type": "score", "score": 3.2, "confidence": 0.88},
+                "cand_1": {"type": "score", "score": -0.2, "confidence": 0.95},
+                "assumption_violated": {"type": "noul", "noul": 0.78, "confidence": 0.78},
+            }
+        )
+
+    client = GeminiDecisionsClient(
+        violation_threshold=0.70,
+        genai_client=SimpleNamespace(decisions=SimpleNamespace(create=fake_create)),
+    )
+    cands = [
+        CandidateOption(action=51, label="S:A", baseline_ev=420.0, make_prob=0.80),
+        CandidateOption(action=0, label="C:2", baseline_ev=-100.0, make_prob=0.20),
+    ]
+    decision = client.evaluate_options("Board context", cands, has_assumptions=True)
+    assert decision.assumption_violated is True
+    assert "0.78" in decision.violation_reason
+    assert "0.70" in decision.violation_reason
+    assert decision.option_scores == pytest.approx({"S:A": 0.80, "C:2": 0.0})
+    assert "S:A" in decision.rationale
+    assert "0.78" in decision.rationale
+
+    # Higher threshold (0.85) does not trigger violation for p=0.78
+    high_thresh_client = GeminiDecisionsClient(
+        violation_threshold=0.85,
+        genai_client=SimpleNamespace(decisions=SimpleNamespace(create=fake_create)),
+    )
+    decision_below = high_thresh_client.evaluate_options(
+        "Board context", cands, has_assumptions=True
+    )
+    assert decision_below.assumption_violated is False
+    assert decision_below.violation_reason == ""
+
+
+def test_gemini_decisions_client_satisfies_structured_model_client_protocol():
+    captured_calls: list[dict[str, Any]] = []
+
+    def fake_create(*, model: str, input: Any, questions: dict[str, Any]) -> Any:
+        captured_calls.append({"model": model, "input": input, "questions": questions})
+        ans: dict[str, Any] = {
+            "cand_0": {"score": 3.6, "confidence": 0.85},
+            "cand_1": {"score": 1.2, "confidence": 0.75},
+        }
+        if "assumption_violated" in questions:
+            ans["assumption_violated"] = {"noul": 0.12, "confidence": 0.88}
+        return SimpleNamespace(answers=ans)
+
+    client = GeminiDecisionsClient(
+        genai_client=SimpleNamespace(decisions=SimpleNamespace(create=fake_create))
+    )
+    assert isinstance(client, StructuredModelClient)
+
+    # Unsupported open-ended schema -> clear ValueError
+    with pytest.raises(ValueError, match="closed-set TacticalDecision"):
+        client.generate_structured("sys", "usr", StrategyState)
+
+    # Prompt with no candidate lines -> ValueError
+    with pytest.raises(ValueError, match="candidate"):
+        client.generate_structured("sys", "=== Board Facts ===", TacticalDecision)
+
+    # Prompt with assumptions present
+    user_prompt_with_assumptions = "\n".join(
+        [
+            "=== Board Facts ===",
+            "Observer: SOUTH | Phase: play",
+            "=== Active Strategy ===",
+            "Assumptions: Spades split 3-2 (conf=0.68)",
+            "=== Candidate Options ===",
+            "- S:A: baseline_ev=420.0, make_prob=0.81",
+            "- C:7: baseline_ev=-100.0, make_prob=N/A",
+        ]
+    )
+    res1 = client.generate_structured(
+        "You are Tenace Layer 2 Tactical Option Evaluator.",
+        user_prompt_with_assumptions,
+        TacticalDecision,
+    )
+    assert res1.option_scores == pytest.approx({"S:A": 0.90, "C:7": 0.30})
+    assert "assumption_violated" in captured_calls[0]["questions"]
+    assert "You are Tenace Layer 2 Tactical Option Evaluator." in captured_calls[0]["input"]
+
+    # Prompt with Assumptions: (none) -> omits assumption_violated
+    user_prompt_no_assumptions = user_prompt_with_assumptions.replace(
+        "Spades split 3-2 (conf=0.68)", "(none)"
+    )
+    res2 = client.generate_structured("Sys", user_prompt_no_assumptions, TacticalDecision)
+    assert res2.option_scores == pytest.approx({"S:A": 0.90, "C:7": 0.30})
+    assert "assumption_violated" not in captured_calls[1]["questions"]
+
+
+def test_gemini_decisions_client_constructor_auth_modes_and_error_handling(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    dummy = SimpleNamespace(decisions=SimpleNamespace(create=lambda **_: None))
+
+    for bad_model in ("", "   ", None, 123):
+        with pytest.raises(ValueError, match="model"):
+            GeminiDecisionsClient(model=bad_model, genai_client=dummy)  # type: ignore[arg-type]
+
+    for bad_thresh in (0.0, 1.0, -0.2, 1.5, math.nan, math.inf, -math.inf, True, "0.7"):
+        with pytest.raises(ValueError, match="violation_threshold"):
+            GeminiDecisionsClient(
+                violation_threshold=bad_thresh,  # type: ignore[arg-type]
+                genai_client=dummy,
+            )
+
+    with pytest.raises(ValueError, match="vertexai"):
+        GeminiDecisionsClient(vertexai="true", genai_client=dummy)  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="vertexai=False"):
+        GeminiDecisionsClient(vertexai=True, api_key="secret-key", genai_client=dummy)
+
+    with pytest.raises(ValueError, match="api_key"):
+        GeminiDecisionsClient(vertexai=False, api_key="   ", genai_client=dummy)
+
+    # Verify genai.Client construction for Vertex AI vs Gemini Developer API v1beta
+    client_inits: list[dict[str, Any]] = []
+
+    def fake_genai_client(**kwargs: Any) -> Any:
+        client_inits.append(kwargs)
+        return dummy
+
+    monkeypatch.setattr("tenace.models.clients.genai.Client", fake_genai_client)
+    monkeypatch.setenv("GEMINI_API_KEY", "env-gemini-key")
+
+    v_client = GeminiDecisionsClient(project="my-gcp-proj", location="us-central1")
+    assert v_client.project == "my-gcp-proj"
+    assert v_client.location == "us-central1"
+    assert client_inits[-1] == {
+        "vertexai": True,
+        "project": "my-gcp-proj",
+        "location": "us-central1",
+    }
+
+    GeminiDecisionsClient(vertexai=False)
+    assert client_inits[-1] == {
+        "api_key": "env-gemini-key",
+        "http_options": {"api_version": "v1beta"},
+    }
+
+    GeminiDecisionsClient(vertexai=False, api_key="  explicit-key  ")
+    assert client_inits[-1] == {
+        "api_key": "explicit-key",
+        "http_options": {"api_version": "v1beta"},
+    }
+
+    # Verify runtime error handling in evaluate_options
+    cands = [CandidateOption(action=52, label="Pass", baseline_ev=0.0, make_prob=0.5)]
+    with pytest.raises(ValueError, match="context_text"):
+        v_client.evaluate_options("   ", cands)
+    with pytest.raises(ValueError, match="candidates"):
+        v_client.evaluate_options("Board context", [])
+
+    empty_client = GeminiDecisionsClient(
+        genai_client=SimpleNamespace(
+            decisions=SimpleNamespace(create=lambda **_: SimpleNamespace(answers={}))
+        )
+    )
+    with pytest.raises(ValueError, match="Empty answers"):
+        empty_client.evaluate_options("Board context", cands)
+
+    missing_cand_client = GeminiDecisionsClient(
+        genai_client=SimpleNamespace(
+            decisions=SimpleNamespace(
+                create=lambda **_: SimpleNamespace(answers={"other": {"score": 2.0}})
+            )
+        )
+    )
+    with pytest.raises(ValueError, match="Missing decision answer for candidate Pass"):
+        missing_cand_client.evaluate_options("Board context", cands, has_assumptions=False)
+
+    nan_score_client = GeminiDecisionsClient(
+        genai_client=SimpleNamespace(
+            decisions=SimpleNamespace(
+                create=lambda **_: SimpleNamespace(answers={"cand_0": {"score": math.nan}})
+            )
+        )
+    )
+    with pytest.raises(ValueError, match="score"):
+        nan_score_client.evaluate_options("Board context", cands, has_assumptions=False)
+
+    missing_viol_client = GeminiDecisionsClient(
+        genai_client=SimpleNamespace(
+            decisions=SimpleNamespace(
+                create=lambda **_: SimpleNamespace(answers={"cand_0": {"score": 2.0}})
+            )
+        )
+    )
+    with pytest.raises(ValueError, match="assumption_violated"):
+        missing_viol_client.evaluate_options("Board context", cands, has_assumptions=True)
+
 
