@@ -580,6 +580,9 @@ def test_step_rejects_invalid_requests_with_422() -> None:
     hand_n = [action_label(c) for c in range(0, 13)]
     hand_s = [action_label(c) for c in range(26, 39)]
 
+    with pytest.raises(ValueError):
+        server_mod.StepRequest(seat="NORTH", board_number=1, own_hand=hand_n, dds_worlds=257)
+
     invalid_payloads: list[dict[str, object]] = [
         # Neither own_hand nor tournament_seed
         {"seat": "NORTH", "board_number": 1},
@@ -660,6 +663,13 @@ def test_step_rejects_invalid_requests_with_422() -> None:
             "board_number": 1,
             "own_hand": hand_n,
             "unexpected_field": True,
+        },
+        # dds_worlds above 256 upper bound
+        {
+            "seat": "NORTH",
+            "board_number": 1,
+            "own_hand": hand_n,
+            "dds_worlds": 257,
         },
     ]
 

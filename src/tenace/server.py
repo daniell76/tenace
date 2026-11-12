@@ -197,7 +197,7 @@ class StepRequest(BaseModel):
     action_history: list[int | str] = Field(default_factory=list)
     prior_strategy: StrategyState | None = None
     profile: ModelProfile | None = None
-    dds_worlds: int | None = Field(default=None, ge=1)
+    dds_worlds: int | None = Field(default=None, ge=1, le=256)
     seed: int = 42
 
     @field_validator("seat", mode="before")

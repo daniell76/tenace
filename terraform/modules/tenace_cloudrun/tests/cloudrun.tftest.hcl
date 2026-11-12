@@ -170,3 +170,50 @@ run "rejects_max_instances_below_min_instances" {
     google_cloud_run_v2_service.api,
   ]
 }
+
+run "rejects_service_name_prefix_over_18_chars" {
+  command = plan
+
+  variables {
+    project_id          = "your-gcp-project-id"
+    environment         = "staging"
+    container_image     = "us-central1-docker.pkg.dev/your-gcp-project-id/tenace/tenace:latest"
+    service_name_prefix = "tenace-contractbridge"
+  }
+
+  expect_failures = [
+    var.service_name_prefix,
+  ]
+}
+
+run "rejects_service_name_prefix_trailing_hyphen" {
+  command = plan
+
+  variables {
+    project_id          = "your-gcp-project-id"
+    environment         = "dev"
+    container_image     = "us-central1-docker.pkg.dev/your-gcp-project-id/tenace/tenace:latest"
+    service_name_prefix = "tenace-"
+  }
+
+  expect_failures = [
+    var.service_name_prefix,
+  ]
+}
+
+run "rejects_full_resource_path_gemini_api_key_secret_id" {
+  command = plan
+
+  variables {
+    project_id               = "your-gcp-project-id"
+    environment              = "dev"
+    container_image          = "us-central1-docker.pkg.dev/your-gcp-project-id/tenace/tenace:latest"
+    decisions_auth           = "api-key"
+    gemini_api_key_secret_id = "projects/p/secrets/my-key"
+  }
+
+  expect_failures = [
+    var.gemini_api_key_secret_id,
+  ]
+}
+

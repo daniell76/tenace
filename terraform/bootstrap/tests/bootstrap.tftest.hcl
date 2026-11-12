@@ -79,3 +79,21 @@ run "rejects_blank_project_id" {
     var.project_id,
   ]
 }
+
+run "accepts_short_artifact_registry_repo_id" {
+  command = plan
+
+  variables {
+    project_id                = "your-gcp-project-id"
+    region                    = "us-central1"
+    create_tfstate_bucket     = false
+    tfstate_bucket_name       = "your-gcp-project-id-tfstate"
+    artifact_registry_repo_id = "ai"
+  }
+
+  assert {
+    condition     = output.artifact_registry_repository_url == "us-central1-docker.pkg.dev/your-gcp-project-id/ai"
+    error_message = "Expected short 2-char artifact_registry_repo_id 'ai' to be valid."
+  }
+}
+

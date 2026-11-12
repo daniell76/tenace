@@ -455,6 +455,8 @@ def test_cli_parser_defaults_to_vertex_and_gcp_env(monkeypatch):
     assert "ModelProfile" in cli_mod.__all__
     assert "build_clients_for_profile" in cli_mod.__all__
     assert "resolve_model_profiles" in cli_mod.__all__
+    for sym in cli_mod.__all__:
+        assert hasattr(cli_mod, sym), f"Stale symbol in tenace.cli.__all__: {sym!r}"
 
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "my-bridge-gcp-proj")
     parser = build_arg_parser()

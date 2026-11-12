@@ -35,8 +35,8 @@ variable "service_name_prefix" {
   default     = "tenace"
 
   validation {
-    condition     = can(regex("^[a-z][a-z0-9-]{1,20}$", var.service_name_prefix))
-    error_message = "service_name_prefix must match ^[a-z][a-z0-9-]{1,20}$."
+    condition     = can(regex("^[a-z]([a-z0-9-]{0,16}[a-z0-9])?$", var.service_name_prefix))
+    error_message = "service_name_prefix must be 1-18 chars matching ^[a-z]([a-z0-9-]{0,16}[a-z0-9])?$."
   }
 }
 
@@ -159,8 +159,8 @@ variable "gemini_api_key_secret_id" {
   default     = null
 
   validation {
-    condition     = var.gemini_api_key_secret_id == null ? true : trimspace(var.gemini_api_key_secret_id) != ""
-    error_message = "gemini_api_key_secret_id must not be blank when provided."
+    condition     = var.gemini_api_key_secret_id == null ? true : can(regex("^[a-zA-Z0-9_-]{1,255}$", var.gemini_api_key_secret_id))
+    error_message = "gemini_api_key_secret_id must be a short Secret Manager secret ID matching ^[a-zA-Z0-9_-]{1,255}$ (not a full projects/.../secrets/... path)."
   }
 }
 

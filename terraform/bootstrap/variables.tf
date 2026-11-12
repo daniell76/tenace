@@ -52,7 +52,7 @@ variable "artifact_registry_repo_id" {
   default     = "tenace"
 
   validation {
-    condition     = can(regex("^[a-z][a-z0-9-]{1,61}[a-z0-9]$", var.artifact_registry_repo_id))
-    error_message = "artifact_registry_repo_id must match ^[a-z][a-z0-9-]{1,61}[a-z0-9]$."
+    condition     = can(regex("^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$", var.artifact_registry_repo_id))
+    error_message = "artifact_registry_repo_id must be 1-63 chars matching ^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$."
   }
 }
