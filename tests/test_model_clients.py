@@ -666,6 +666,22 @@ def test_gemini_decisions_client_satisfies_structured_model_client_protocol():
     assert res2.option_scores == pytest.approx({"S:A": 0.90, "C:7": 0.30})
     assert "assumption_violated" not in captured_calls[1]["questions"]
 
+    # Substring "Assumptions: (none)" inside another field must NOT suppress assumption_violated
+    user_prompt_substring_trap = "\n".join(
+        [
+            "=== Board Facts ===",
+            "Observer: SOUTH | Phase: play",
+            "=== Active Strategy ===",
+            "Plan Summary: Avoid line where Assumptions: (none) would hold",
+            "Assumptions: Spades split 3-2 (conf=0.68)",
+            "=== Candidate Options ===",
+            "- S:A: baseline_ev=420.0, make_prob=0.81",
+            "- C:7: baseline_ev=-100.0, make_prob=N/A",
+        ]
+    )
+    client.generate_structured("Sys", user_prompt_substring_trap, TacticalDecision)
+    assert "assumption_violated" in captured_calls[2]["questions"]
+
 
 def test_gemini_decisions_client_constructor_auth_modes_and_error_handling(
     monkeypatch: pytest.MonkeyPatch,
@@ -689,8 +705,16 @@ def test_gemini_decisions_client_constructor_auth_modes_and_error_handling(
     with pytest.raises(ValueError, match="vertexai=False"):
         GeminiDecisionsClient(vertexai=True, api_key="secret-key", genai_client=dummy)
 
+    with pytest.raises(ValueError, match="vertexai=True"):
+        GeminiDecisionsClient(vertexai=False, project="my-gcp-proj", genai_client=dummy)
+
     with pytest.raises(ValueError, match="api_key"):
         GeminiDecisionsClient(vertexai=False, api_key="   ", genai_client=dummy)
+
+    # Regression test against real genai.Client when GOOGLE_GENAI_USE_VERTEXAI=true is set in env
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    real_dev_client = GeminiDecisionsClient(vertexai=False, api_key="test-key")
+    assert real_dev_client._client._api_client.vertexai is False
 
     # Verify genai.Client construction for Vertex AI vs Gemini Developer API v1beta
     client_inits: list[dict[str, Any]] = []
@@ -713,12 +737,14 @@ def test_gemini_decisions_client_constructor_auth_modes_and_error_handling(
 
     GeminiDecisionsClient(vertexai=False)
     assert client_inits[-1] == {
+        "vertexai": False,
         "api_key": "env-gemini-key",
         "http_options": {"api_version": "v1beta"},
     }
 
     GeminiDecisionsClient(vertexai=False, api_key="  explicit-key  ")
     assert client_inits[-1] == {
+        "vertexai": False,
         "api_key": "explicit-key",
         "http_options": {"api_version": "v1beta"},
     }
@@ -738,6 +764,24 @@ def test_gemini_decisions_client_constructor_auth_modes_and_error_handling(
     with pytest.raises(ValueError, match="Empty answers"):
         empty_client.evaluate_options("Board context", cands)
 
+    blocked_resp = genai_decisions.CreateDecisionResponse(
+        answers=None,
+        prompt_feedback=genai_decisions.PromptFeedback(
+            block_reason="safety",
+            block_reason_message="Prompt blocked due to safety policy",
+        ),
+    )
+    blocked_client = GeminiDecisionsClient(
+        genai_client=SimpleNamespace(
+            decisions=SimpleNamespace(create=lambda **_: blocked_resp)
+        )
+    )
+    with pytest.raises(
+        ValueError,
+        match="Gemini Decisions API blocked request: safety: Prompt blocked due to safety policy",
+    ):
+        blocked_client.evaluate_options("Board context", cands)
+
     missing_cand_client = GeminiDecisionsClient(
         genai_client=SimpleNamespace(
             decisions=SimpleNamespace(
@@ -748,15 +792,18 @@ def test_gemini_decisions_client_constructor_auth_modes_and_error_handling(
     with pytest.raises(ValueError, match="Missing decision answer for candidate Pass"):
         missing_cand_client.evaluate_options("Board context", cands, has_assumptions=False)
 
-    nan_score_client = GeminiDecisionsClient(
-        genai_client=SimpleNamespace(
-            decisions=SimpleNamespace(
-                create=lambda **_: SimpleNamespace(answers={"cand_0": {"score": math.nan}})
+    for bad_score in (math.nan, True):
+        bad_score_client = GeminiDecisionsClient(
+            genai_client=SimpleNamespace(
+                decisions=SimpleNamespace(
+                    create=lambda _s=bad_score, **_: SimpleNamespace(
+                        answers={"cand_0": {"score": _s}}
+                    )
+                )
             )
         )
-    )
-    with pytest.raises(ValueError, match="score"):
-        nan_score_client.evaluate_options("Board context", cands, has_assumptions=False)
+        with pytest.raises(ValueError, match="score"):
+            bad_score_client.evaluate_options("Board context", cands, has_assumptions=False)
 
     missing_viol_client = GeminiDecisionsClient(
         genai_client=SimpleNamespace(
@@ -767,5 +814,21 @@ def test_gemini_decisions_client_constructor_auth_modes_and_error_handling(
     )
     with pytest.raises(ValueError, match="assumption_violated"):
         missing_viol_client.evaluate_options("Board context", cands, has_assumptions=True)
+
+    for bad_noul in (True, -0.1, 1.5, math.nan, math.inf):
+        bad_noul_client = GeminiDecisionsClient(
+            genai_client=SimpleNamespace(
+                decisions=SimpleNamespace(
+                    create=lambda _n=bad_noul, **_: SimpleNamespace(
+                        answers={
+                            "cand_0": {"score": 2.0},
+                            "assumption_violated": {"noul": _n},
+                        }
+                    )
+                )
+            )
+        )
+        with pytest.raises(ValueError, match="noul"):
+            bad_noul_client.evaluate_options("Board context", cands, has_assumptions=True)
 
 

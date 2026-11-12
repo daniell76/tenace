@@ -24,6 +24,10 @@ _CANDIDATE_LINE_RE = re.compile(
     r"\s*make_prob=(?P<mp>N/A|[-+]?\d+(?:\.\d+)?)\s*$",
     flags=re.MULTILINE,
 )
+_NO_ASSUMPTIONS_LINE_RE = re.compile(
+    r"^Assumptions:\s*\(none\)\s*$",
+    flags=re.MULTILINE,
+)
 
 _DECISION_SCORE_CRITERIA: tuple[str, ...] = (
     "0 - Severe tactical blunder that sacrifices expected value or contract make probability.",
@@ -308,6 +312,8 @@ class GeminiDecisionsClient:
             )
         if vertexai and api_key is not None:
             raise ValueError("Set vertexai=False when authenticating with api_key")
+        if not vertexai and project is not None:
+            raise ValueError("Set vertexai=True when specifying project")
         if api_key is not None and (not isinstance(api_key, str) or not api_key.strip()):
             raise ValueError("api_key must not be blank when provided")
 
@@ -332,6 +338,7 @@ class GeminiDecisionsClient:
                 else (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
             )
             self._client = genai.Client(
+                vertexai=False,
                 api_key=resolved_key,
                 http_options={"api_version": "v1beta"},
             )
@@ -387,8 +394,33 @@ class GeminiDecisionsClient:
             input=context_text,
             questions=questions,
         )
-        answers = getattr(resp, "answers", None)
+        answers = resp.get("answers") if isinstance(resp, Mapping) else getattr(resp, "answers", None)
         if not isinstance(answers, Mapping) or not answers:
+            prompt_feedback = (
+                resp.get("prompt_feedback")
+                if isinstance(resp, Mapping)
+                else getattr(resp, "prompt_feedback", None)
+            )
+            if prompt_feedback is not None:
+                raw_reason = (
+                    prompt_feedback.get("block_reason")
+                    if isinstance(prompt_feedback, Mapping)
+                    else getattr(prompt_feedback, "block_reason", None)
+                )
+                raw_msg = (
+                    prompt_feedback.get("block_reason_message")
+                    if isinstance(prompt_feedback, Mapping)
+                    else getattr(prompt_feedback, "block_reason_message", None)
+                )
+                reason_str = raw_reason.strip() if isinstance(raw_reason, str) else ""
+                msg_str = raw_msg.strip() if isinstance(raw_msg, str) else ""
+                if reason_str or msg_str:
+                    details = (
+                        f"{reason_str}: {msg_str}"
+                        if reason_str and msg_str
+                        else (reason_str or msg_str)
+                    )
+                    raise ValueError(f"Gemini Decisions API blocked request: {details}")
             raise ValueError("Empty answers from Gemini Decisions API")
 
         option_scores: dict[str, float] = {}
@@ -431,7 +463,7 @@ class GeminiDecisionsClient:
                 if isinstance(v_ans, Mapping)
                 else getattr(v_ans, "noul", None)
             )
-            if not _is_finite_number(raw_noul):
+            if not _is_finite_number(raw_noul) or not (0.0 <= float(raw_noul) <= 1.0):
                 raise ValueError(
                     f"Invalid noul probability for assumption_violated: {raw_noul!r}"
                 )
@@ -505,7 +537,7 @@ class GeminiDecisionsClient:
         if not parsed_candidates:
             raise ValueError("No candidate options found in user_prompt")
 
-        has_assumptions = "Assumptions: (none)" not in user_prompt
+        has_assumptions = _NO_ASSUMPTIONS_LINE_RE.search(user_prompt) is None
         combined_context = (
             f"{system_prompt.strip()}\n\n{user_prompt.strip()}"
             if system_prompt.strip()
