@@ -861,3 +861,198 @@ def test_main_exits_with_zero_on_mock_smoke(monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         main()
     assert exc_info.value.code == 0
+
+
+def test_cli_rejects_opponent_override_flags_when_opponent_is_not_tenace():
+    opponent_flag_cases = [
+        ["--opponent-strategist-location", "us-central1"],
+        ["--opponent-strategist-model", "gemini-2.5-pro"],
+        ["--opponent-evaluator-backend", "diffusion-gemma"],
+        ["--opponent-evaluator-location", "us-central1"],
+        ["--opponent-evaluator-model", "gemini-2.5-flash"],
+        ["--opponent-evaluator-endpoint-id", "ep-123"],
+        ["--opponent-decisions-auth", "api-key"],
+        ["--opponent-decisions-violation-threshold", "0.80"],
+    ]
+    for flag_pair in opponent_flag_cases:
+        args = build_arg_parser().parse_args(["--opponent", "baseline", *flag_pair])
+        with pytest.raises(ValueError, match="--opponent tenace"):
+            resolve_model_profiles(args)
+        with pytest.raises(ValueError, match="--opponent tenace"):
+            run_cli(["--mode", "mock", "--opponent", "baseline", "--boards", "1", *flag_pair])
+
+
+def test_model_profile_endpoint_and_decisions_auth_backend_compatibility_and_short_labels():
+    # 1. evaluator_endpoint_id rejected on non-diffusion-gemma backends
+    for incompatible_backend in ("decisions", "gemini"):
+        with pytest.raises(ValueError, match="evaluator_endpoint_id"):
+            ModelProfile(
+                evaluator_backend=incompatible_backend,  # type: ignore[arg-type]
+                evaluator_endpoint_id="ep-123",
+            )
+        with pytest.raises(ValueError, match="evaluator_endpoint_id"):
+            run_cli(
+                [
+                    "--mode",
+                    "mock",
+                    "--evaluator-backend",
+                    incompatible_backend,
+                    "--evaluator-endpoint-id",
+                    "ep-123",
+                    "--boards",
+                    "1",
+                ]
+            )
+
+    # 2. short_label() surfaces endpoint ID for diffusion-gemma and shortens slash resource names
+    ep_profile = ModelProfile(
+        evaluator_backend="diffusion-gemma",
+        evaluator_endpoint_id="  ep-12345  ",
+    )
+    assert ep_profile.evaluator_endpoint_id == "ep-12345"
+    assert ep_profile.short_label() == "L1:gemini-4-argon | L2:diffusion-gemma/endpoint:ep-12345"
+
+    mock_ep_profile = ModelProfile(
+        mode="mock",
+        evaluator_backend="diffusion-gemma",
+        evaluator_endpoint_id="ep-999",
+    )
+    assert (
+        mock_ep_profile.short_label()
+        == "mock | L1:gemini-4-argon | L2:diffusion-gemma/endpoint:ep-999"
+    )
+
+    full_path_profile = ModelProfile(
+        strategist_model="projects/p/locations/global/publishers/google/models/gemini-4-carbon",
+        evaluator_backend="gemini",
+        evaluator_model="projects/p/locations/us-central1/publishers/google/models/gemini-2.5-flash",
+    )
+    assert full_path_profile.short_label() == "L1:gemini-4-carbon | L2:gemini/gemini-2.5-flash"
+
+    # 3. decisions_auth != "vertex" rejected on non-decisions backends
+    for incompatible_backend in ("diffusion-gemma", "gemini"):
+        with pytest.raises(ValueError, match="decisions_auth"):
+            ModelProfile(
+                evaluator_backend=incompatible_backend,  # type: ignore[arg-type]
+                decisions_auth="api-key",
+            )
+
+    # 4. Cross-backend inheritance in resolve_model_profiles:
+    #    Team A uses decisions + api-key, Team B switches to diffusion-gemma without --opponent-decisions-auth
+    parser = build_arg_parser()
+    cross_args = parser.parse_args(
+        [
+            "--evaluator-backend",
+            "decisions",
+            "--decisions-auth",
+            "api-key",
+            "--opponent",
+            "tenace",
+            "--opponent-evaluator-backend",
+            "diffusion-gemma",
+        ]
+    )
+    team_a, team_b = resolve_model_profiles(cross_args)
+    assert team_b is not None
+    assert team_a.decisions_auth == "api-key"
+    assert team_b.evaluator_backend == "diffusion-gemma"
+    assert team_b.decisions_auth == "vertex"
+
+    #    Same backend (decisions): Team B inherits Team A's api-key when omitted
+    same_args = parser.parse_args(
+        [
+            "--evaluator-backend",
+            "decisions",
+            "--decisions-auth",
+            "api-key",
+            "--opponent",
+            "tenace",
+            "--opponent-strategist-model",
+            "gemini-2.5-pro",
+        ]
+    )
+    _, team_b_same = resolve_model_profiles(same_args)
+    assert team_b_same is not None
+    assert team_b_same.decisions_auth == "api-key"
+
+    #    Explicit --opponent-decisions-auth api-key with --opponent-evaluator-backend diffusion-gemma fails
+    bad_opp_auth_args = parser.parse_args(
+        [
+            "--opponent",
+            "tenace",
+            "--opponent-evaluator-backend",
+            "diffusion-gemma",
+            "--opponent-decisions-auth",
+            "api-key",
+        ]
+    )
+    with pytest.raises(ValueError, match="decisions_auth"):
+        resolve_model_profiles(bad_opp_auth_args)
+
+
+def test_model_profile_strips_strings_and_rejects_blank_values(monkeypatch):
+    padded = ModelProfile(
+        project="  my-proj  ",
+        strategist_location="  global  ",
+        strategist_model="  gemini-4-argon  ",
+        evaluator_backend="diffusion-gemma",
+        evaluator_location="  us-central1  ",
+        evaluator_model="  publishers/google/models/diffusiongemma-26b-a4b-it  ",
+        evaluator_endpoint_id="  ep-42  ",
+    )
+    assert padded.project == "my-proj"
+    assert padded.strategist_location == "global"
+    assert padded.strategist_model == "gemini-4-argon"
+    assert padded.evaluator_location == "us-central1"
+    assert padded.evaluator_model == "publishers/google/models/diffusiongemma-26b-a4b-it"
+    assert padded.evaluator_endpoint_id == "ep-42"
+
+    # None project remains allowed
+    none_proj = ModelProfile(project=None)
+    assert none_proj.project is None
+
+    for blank in ("", "   "):
+        with pytest.raises(ValueError, match="strategist_model"):
+            ModelProfile(strategist_model=blank)
+        with pytest.raises(ValueError, match="strategist_location"):
+            ModelProfile(strategist_location=blank)
+        with pytest.raises(ValueError, match="evaluator_model"):
+            ModelProfile(evaluator_model=blank)
+        with pytest.raises(ValueError, match="evaluator_location"):
+            ModelProfile(evaluator_location=blank)
+        with pytest.raises(ValueError, match="project"):
+            ModelProfile(project=blank)
+        with pytest.raises(ValueError, match="evaluator_endpoint_id"):
+            ModelProfile(evaluator_backend="diffusion-gemma", evaluator_endpoint_id=blank)
+
+    monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "   ")
+    assert build_arg_parser().parse_args([]).project == "your-gcp-project-id"
+
+
+def test_format_match_report_renders_per_team_telemetry_when_team_b_profile_present_even_with_zero_activity():
+    from tenace.harness import MatchSummary
+
+    zero_b_summary = MatchSummary(
+        tournament_seed=42,
+        boards=[],
+        telemetry={
+            "strategist_calls": 2,
+            "evaluator_calls": 2,
+            "forced_moves": 4,
+            "team_a_strategist_calls": 2,
+            "team_a_evaluator_calls": 2,
+            "team_a_forced_moves": 4,
+            "team_b_strategist_calls": 0,
+            "team_b_evaluator_calls": 0,
+            "team_b_forced_moves": 0,
+        },
+    )
+    h2h_report = format_match_report(
+        zero_b_summary,
+        team_a_name="Tenace-A",
+        team_b_name="Tenace-B",
+        team_a_profile="L1:gemini-4-argon | L2:decisions/gemini-decision-1",
+        team_b_profile="L1:gemini-4-argon | L2:diffusion-gemma/diffusiongemma-26b-a4b-it",
+    )
+    assert "Tenace-A: strategist_calls=2, evaluator_calls=2, forced_moves=4" in h2h_report
+    assert "Tenace-B: strategist_calls=0, evaluator_calls=0, forced_moves=0" in h2h_report

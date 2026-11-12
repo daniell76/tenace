@@ -832,3 +832,137 @@ def test_gemini_decisions_client_constructor_auth_modes_and_error_handling(
             bad_noul_client.evaluate_options("Board context", cands, has_assumptions=True)
 
 
+def test_model_clients_strip_and_reject_blank_strings_and_env_api_key_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    dummy_genai = SimpleNamespace(
+        models=SimpleNamespace(generate_content=lambda **_: None),
+        decisions=SimpleNamespace(create=lambda **_: None),
+    )
+
+    # 1. VertexGeminiClient strips and rejects blank model/location/project
+    vg = VertexGeminiClient(
+        project="  proj-1  ",
+        location="  global  ",
+        model="  gemini-4-argon  ",
+        genai_client=dummy_genai,
+    )
+    assert vg.project == "proj-1"
+    assert vg.location == "global"
+    assert vg.model == "gemini-4-argon"
+    for blank in ("", "   "):
+        with pytest.raises(ValueError, match="model"):
+            VertexGeminiClient(model=blank, genai_client=dummy_genai)
+        with pytest.raises(ValueError, match="location"):
+            VertexGeminiClient(location=blank, genai_client=dummy_genai)
+        with pytest.raises(ValueError, match="project"):
+            VertexGeminiClient(project=blank, genai_client=dummy_genai)
+
+    # 2. DiffusionGemmaClient strips and rejects blank maas_model_name/location/project/endpoint_id
+    dg = DiffusionGemmaClient(
+        project="  proj-2  ",
+        location="  us-central1  ",
+        maas_model_name="  publishers/google/models/diffusiongemma-26b-a4b-it  ",
+        genai_maas_client=dummy_genai,
+    )
+    assert dg.project == "proj-2"
+    assert dg.location == "us-central1"
+    assert dg.maas_model_name == "publishers/google/models/diffusiongemma-26b-a4b-it"
+    for blank in ("", "   "):
+        with pytest.raises(ValueError, match="maas_model_name"):
+            DiffusionGemmaClient(maas_model_name=blank, genai_maas_client=dummy_genai)
+        with pytest.raises(ValueError, match="location"):
+            DiffusionGemmaClient(location=blank, genai_maas_client=dummy_genai)
+        with pytest.raises(ValueError, match="project"):
+            DiffusionGemmaClient(project=blank, genai_maas_client=dummy_genai)
+        with pytest.raises(ValueError, match="endpoint_id"):
+            DiffusionGemmaClient(endpoint_id=blank)
+
+    # 3. GeminiDecisionsClient strips and rejects blank location/project/api_key + env fallback
+    gd = GeminiDecisionsClient(
+        project="  proj-3  ",
+        location="  global  ",
+        model="  gemini-decision-1  ",
+        genai_client=dummy_genai,
+    )
+    assert gd.project == "proj-3"
+    assert gd.location == "global"
+    assert gd.model == "gemini-decision-1"
+    for blank in ("", "   "):
+        with pytest.raises(ValueError, match="location"):
+            GeminiDecisionsClient(location=blank, genai_client=dummy_genai)
+        with pytest.raises(ValueError, match="project"):
+            GeminiDecisionsClient(project=blank, genai_client=dummy_genai)
+        with pytest.raises(ValueError, match="api_key"):
+            GeminiDecisionsClient(vertexai=False, api_key=blank, genai_client=dummy_genai)
+
+    # Env API key whitespace fallback: GEMINI_API_KEY="   " falls back to stripped GOOGLE_API_KEY
+    client_inits: list[dict[str, Any]] = []
+
+    def spy_genai_client(**kwargs: Any) -> Any:
+        client_inits.append(kwargs)
+        return dummy_genai
+
+    monkeypatch.setattr("tenace.models.clients.genai.Client", spy_genai_client)
+    monkeypatch.setenv("GEMINI_API_KEY", "   ")
+    monkeypatch.setenv("GOOGLE_API_KEY", "  google-fallback-key  ")
+
+    GeminiDecisionsClient(vertexai=False)
+    assert client_inits[-1] == {
+        "vertexai": False,
+        "api_key": "google-fallback-key",
+        "http_options": {"api_version": "v1beta"},
+    }
+
+    # Explicit blank api_key still raises even when valid env key exists
+    with pytest.raises(ValueError, match="api_key"):
+        GeminiDecisionsClient(vertexai=False, api_key="")
+    with pytest.raises(ValueError, match="api_key"):
+        GeminiDecisionsClient(vertexai=False, api_key="   ")
+
+    # Missing / whitespace-only env keys with api_key=None raises ValueError
+    monkeypatch.setenv("GEMINI_API_KEY", "   ")
+    monkeypatch.setenv("GOOGLE_API_KEY", "   ")
+    with pytest.raises(ValueError, match="api_key|API key"):
+        GeminiDecisionsClient(vertexai=False)
+
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="api_key|API key"):
+        GeminiDecisionsClient(vertexai=False)
+
+
+def test_gemini_decisions_client_rejects_duplicate_candidate_labels_before_api_call():
+    api_calls = 0
+
+    def spy_create(**_: Any) -> Any:
+        nonlocal api_calls
+        api_calls += 1
+        return SimpleNamespace(answers={})
+
+    client = GeminiDecisionsClient(
+        genai_client=SimpleNamespace(decisions=SimpleNamespace(create=spy_create))
+    )
+    dup_cands = [
+        CandidateOption(action=52, label="Pass", baseline_ev=0.0, make_prob=0.5),
+        CandidateOption(action=53, label="Pass", baseline_ev=-100.0, make_prob=0.3),
+    ]
+    with pytest.raises(ValueError, match="[Dd]uplicate candidate label"):
+        client.evaluate_options("Board context", dup_cands)
+    assert api_calls == 0
+
+    dup_prompt = "\n".join(
+        [
+            "=== Board Facts ===",
+            "Observer: NORTH | Phase: auction",
+            "=== Candidate Options ===",
+            "- 1NT: baseline_ev=120.0, make_prob=0.65",
+            "- 1NT: baseline_ev=90.0, make_prob=0.55",
+        ]
+    )
+    with pytest.raises(ValueError, match="[Dd]uplicate candidate label"):
+        client.generate_structured("Sys", dup_prompt, TacticalDecision)
+    assert api_calls == 0
+
+
+

@@ -102,6 +102,20 @@ def extract_json_object(raw_text: str, schema: type[T]) -> T:
     raise ValueError("No valid JSON object found in model response")
 
 
+def _clean_required_str(value: Any, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must be a non-blank string")
+    return value.strip()
+
+
+def _clean_optional_str(value: Any, name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{name} must not be blank when provided")
+    return value.strip()
+
+
 class VertexGeminiClient:
     def __init__(
         self,
@@ -111,6 +125,9 @@ class VertexGeminiClient:
         temperature: float = 0.2,
         genai_client: Any | None = None,
     ) -> None:
+        cleaned_project = _clean_optional_str(project, "project")
+        cleaned_location = _clean_required_str(location, "location")
+        cleaned_model = _clean_required_str(model, "model")
         if (
             isinstance(temperature, bool)
             or not isinstance(temperature, (int, float))
@@ -119,14 +136,18 @@ class VertexGeminiClient:
         ):
             raise ValueError(f"temperature must be between 0.0 and 2.0, got {temperature!r}")
 
-        self.project = project
-        self.location = location
-        self.model = model
+        self.project = cleaned_project
+        self.location = cleaned_location
+        self.model = cleaned_model
         self.temperature = float(temperature)
         self._client = (
             genai_client
             if genai_client is not None
-            else genai.Client(vertexai=True, project=project, location=location)
+            else genai.Client(
+                vertexai=True,
+                project=self.project,
+                location=self.location,
+            )
         )
 
     def generate_structured(
@@ -178,19 +199,23 @@ class DiffusionGemmaClient:
         endpoint: Any | None = None,
         genai_maas_client: Any | None = None,
     ) -> None:
-        if endpoint_id is not None and not endpoint_id.strip():
-            raise ValueError("endpoint_id must not be blank when provided")
-        if endpoint is not None and endpoint_id is not None:
+        cleaned_project = _clean_optional_str(project, "project")
+        cleaned_location = _clean_required_str(location, "location")
+        cleaned_endpoint_id = _clean_optional_str(endpoint_id, "endpoint_id")
+        cleaned_maas_model = _clean_required_str(maas_model_name, "maas_model_name")
+        if endpoint is not None and cleaned_endpoint_id is not None:
             raise ValueError("Pass at most one of endpoint or endpoint_id")
-        if genai_maas_client is not None and (endpoint is not None or endpoint_id is not None):
+        if genai_maas_client is not None and (
+            endpoint is not None or cleaned_endpoint_id is not None
+        ):
             raise ValueError(
                 "Cannot configure both Vertex Endpoint (endpoint/endpoint_id) and genai_maas_client"
             )
 
-        self.project = project
-        self.location = location
-        self.endpoint_id = endpoint_id.strip() if endpoint_id is not None else None
-        self.maas_model_name = maas_model_name
+        self.project = cleaned_project
+        self.location = cleaned_location
+        self.endpoint_id = cleaned_endpoint_id
+        self.maas_model_name = cleaned_maas_model
         self.sampling = sampling if sampling is not None else DiffusionSamplingConfig()
 
         if endpoint is not None:
@@ -199,8 +224,8 @@ class DiffusionGemmaClient:
         elif self.endpoint_id is not None:
             self._endpoint = aiplatform.Endpoint(
                 endpoint_name=self.endpoint_id,
-                project=project,
-                location=location,
+                project=self.project,
+                location=self.location,
             )
             self._genai_maas = None
         elif genai_maas_client is not None:
@@ -210,8 +235,8 @@ class DiffusionGemmaClient:
             self._endpoint = None
             self._genai_maas = genai.Client(
                 vertexai=True,
-                project=project,
-                location=location,
+                project=self.project,
+                location=self.location,
             )
 
     def generate_structured(
@@ -301,8 +326,10 @@ class GeminiDecisionsClient:
         violation_threshold: float = 0.70,
         genai_client: Any | None = None,
     ) -> None:
-        if not isinstance(model, str) or not model.strip():
-            raise ValueError("model must be a non-blank string")
+        cleaned_model = _clean_required_str(model, "model")
+        cleaned_location = _clean_required_str(location, "location")
+        cleaned_project = _clean_optional_str(project, "project")
+        explicit_api_key = _clean_optional_str(api_key, "api_key")
         if not isinstance(vertexai, bool):
             raise ValueError("vertexai must be a bool")
         if not _is_finite_number(violation_threshold) or not (0.0 < violation_threshold < 1.0):
@@ -310,16 +337,14 @@ class GeminiDecisionsClient:
                 "violation_threshold must be strictly between 0.0 and 1.0, "
                 f"got {violation_threshold!r}"
             )
-        if vertexai and api_key is not None:
+        if vertexai and explicit_api_key is not None:
             raise ValueError("Set vertexai=False when authenticating with api_key")
-        if not vertexai and project is not None:
+        if not vertexai and cleaned_project is not None:
             raise ValueError("Set vertexai=True when specifying project")
-        if api_key is not None and (not isinstance(api_key, str) or not api_key.strip()):
-            raise ValueError("api_key must not be blank when provided")
 
-        self.project = project
-        self.location = location
-        self.model = model.strip()
+        self.project = cleaned_project
+        self.location = cleaned_location
+        self.model = cleaned_model
         self.vertexai = vertexai
         self.violation_threshold = float(violation_threshold)
 
@@ -328,15 +353,21 @@ class GeminiDecisionsClient:
         elif vertexai:
             self._client = genai.Client(
                 vertexai=True,
-                project=project,
-                location=location,
+                project=self.project,
+                location=self.location,
             )
         else:
             resolved_key = (
-                api_key.strip()
-                if api_key is not None
-                else (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
+                explicit_api_key
+                or (os.environ.get("GEMINI_API_KEY") or "").strip()
+                or (os.environ.get("GOOGLE_API_KEY") or "").strip()
+                or None
             )
+            if resolved_key is None:
+                raise ValueError(
+                    "API key required when vertexai=False: pass api_key or set "
+                    "GEMINI_API_KEY / GOOGLE_API_KEY"
+                )
             self._client = genai.Client(
                 vertexai=False,
                 api_key=resolved_key,
@@ -353,6 +384,14 @@ class GeminiDecisionsClient:
             raise ValueError("context_text must be a non-blank string")
         if not candidates:
             raise ValueError("candidates must be non-empty")
+
+        seen_labels: set[str] = set()
+        for cand in candidates:
+            if cand.label in seen_labels:
+                raise ValueError(
+                    f"Duplicate candidate label in evaluate_options: {cand.label!r}"
+                )
+            seen_labels.add(cand.label)
 
         questions: dict[str, dict[str, Any]] = {}
         for idx, cand in enumerate(candidates):

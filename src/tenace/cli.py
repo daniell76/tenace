@@ -41,7 +41,16 @@ DEFAULT_DECISIONS_MODEL = "gemini-decision-1"
 DEFAULT_DIFFUSION_MODEL = "publishers/google/models/diffusiongemma-26b-a4b-it"
 DEFAULT_GEMINI_EVALUATOR_MODEL = "gemini-2.5-flash"
 
-_PUBLISHER_PREFIX = "publishers/google/models/"
+_OPPONENT_TENACE_FLAGS: tuple[tuple[str, str], ...] = (
+    ("opponent_strategist_location", "--opponent-strategist-location"),
+    ("opponent_strategist_model", "--opponent-strategist-model"),
+    ("opponent_evaluator_backend", "--opponent-evaluator-backend"),
+    ("opponent_evaluator_location", "--opponent-evaluator-location"),
+    ("opponent_evaluator_model", "--opponent-evaluator-model"),
+    ("opponent_evaluator_endpoint_id", "--opponent-evaluator-endpoint-id"),
+    ("opponent_decisions_auth", "--opponent-decisions-auth"),
+    ("opponent_decisions_violation_threshold", "--opponent-decisions-violation-threshold"),
+)
 
 _HCP_RE = re.compile(r"Own Hand\s*\((\d+)\s*HCP\)", re.IGNORECASE)
 _PHASE_RE = re.compile(r"Phase:\s*(auction|play)\b", re.IGNORECASE)
@@ -95,6 +104,20 @@ def _validate_violation_threshold(value: Any, *, flag_name: str = "decisions_vio
     return float(value)
 
 
+def _strip_required_str(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must be a non-blank string")
+    return value.strip()
+
+
+def _strip_optional_str(value: Any, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{field_name} must not be blank when provided")
+    return value.strip()
+
+
 class ModelProfile(BaseModel):
     """Configurable Layer-1 Strategist and Layer-2 Tactical Evaluator profile for a team."""
 
@@ -117,7 +140,8 @@ class ModelProfile(BaseModel):
         if not isinstance(data, dict):
             return data
         resolved = dict(data)
-        backend = resolved.get("evaluator_backend") or "decisions"
+        raw_backend = resolved.get("evaluator_backend")
+        backend = "decisions" if raw_backend is None else raw_backend
         if backend in ("decisions", "diffusion-gemma", "gemini"):
             if resolved.get("evaluator_location") is None:
                 resolved["evaluator_location"] = _default_evaluator_location(backend)
@@ -125,18 +149,48 @@ class ModelProfile(BaseModel):
                 resolved["evaluator_model"] = _default_evaluator_model(backend)
         return resolved
 
+    @field_validator(
+        "strategist_location",
+        "strategist_model",
+        "evaluator_location",
+        "evaluator_model",
+    )
+    @classmethod
+    def _validate_required_strings(cls, value: str, info: Any) -> str:
+        return _strip_required_str(value, info.field_name)
+
+    @field_validator("project", "evaluator_endpoint_id")
+    @classmethod
+    def _validate_optional_strings(cls, value: str | None, info: Any) -> str | None:
+        return _strip_optional_str(value, info.field_name)
+
     @field_validator("decisions_violation_threshold")
     @classmethod
     def _check_threshold(cls, value: float) -> float:
         return _validate_violation_threshold(value)
 
-    def _short_eval_model(self) -> str:
-        if self.evaluator_model.startswith(_PUBLISHER_PREFIX):
-            return self.evaluator_model[len(_PUBLISHER_PREFIX) :]
-        return self.evaluator_model
+    @model_validator(mode="after")
+    def _check_backend_compatibility(self) -> ModelProfile:
+        if self.evaluator_endpoint_id is not None and self.evaluator_backend != "diffusion-gemma":
+            raise ValueError(
+                "evaluator_endpoint_id is only supported when "
+                f"evaluator_backend='diffusion-gemma', got {self.evaluator_backend!r}"
+            )
+        if self.decisions_auth != "vertex" and self.evaluator_backend != "decisions":
+            raise ValueError(
+                f"decisions_auth={self.decisions_auth!r} is only supported when "
+                f"evaluator_backend='decisions', got {self.evaluator_backend!r}"
+            )
+        return self
+
+    def _short_eval_target(self) -> str:
+        if self.evaluator_backend == "diffusion-gemma" and self.evaluator_endpoint_id is not None:
+            return f"endpoint:{self.evaluator_endpoint_id}"
+        return self.evaluator_model.rsplit("/", 1)[-1]
 
     def short_label(self) -> str:
-        core = f"L1:{self.strategist_model} | L2:{self.evaluator_backend}/{self._short_eval_model()}"
+        short_strat = self.strategist_model.rsplit("/", 1)[-1]
+        core = f"L1:{short_strat} | L2:{self.evaluator_backend}/{self._short_eval_target()}"
         if self.mode == "mock":
             return f"mock | {core}"
         return core
@@ -281,7 +335,7 @@ class HeuristicMockModelClient:
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    default_project = os.environ.get("GOOGLE_CLOUD_PROJECT") or DEFAULT_GCP_PROJECT
+    default_project = (os.environ.get("GOOGLE_CLOUD_PROJECT") or "").strip() or DEFAULT_GCP_PROJECT
 
     parser = argparse.ArgumentParser(
         prog="tenace-match",
@@ -454,6 +508,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def resolve_model_profiles(
     args: argparse.Namespace,
 ) -> tuple[ModelProfile, ModelProfile | None]:
+    if args.opponent != "tenace":
+        provided_opponent_flags = [
+            cli_flag
+            for attr_name, cli_flag in _OPPONENT_TENACE_FLAGS
+            if getattr(args, attr_name, None) is not None
+        ]
+        if provided_opponent_flags:
+            flags_str = ", ".join(provided_opponent_flags)
+            raise ValueError(
+                f"{flags_str} require --opponent tenace (got --opponent {args.opponent})"
+            )
+
     _validate_violation_threshold(
         args.decisions_violation_threshold,
         flag_name="--decisions-violation-threshold",
@@ -502,6 +568,11 @@ def resolve_model_profiles(
         if args.opponent_evaluator_endpoint_id is not None
         else (team_a.evaluator_endpoint_id if same_backend else None)
     )
+    opp_decisions_auth = (
+        args.opponent_decisions_auth
+        if args.opponent_decisions_auth is not None
+        else (team_a.decisions_auth if opp_backend == "decisions" else "vertex")
+    )
 
     team_b = ModelProfile(
         mode=args.mode,
@@ -520,11 +591,7 @@ def resolve_model_profiles(
         evaluator_location=opp_eval_location,
         evaluator_model=opp_eval_model,
         evaluator_endpoint_id=opp_eval_endpoint_id,
-        decisions_auth=(
-            args.opponent_decisions_auth
-            if args.opponent_decisions_auth is not None
-            else team_a.decisions_auth
-        ),
+        decisions_auth=opp_decisions_auth,
         decisions_violation_threshold=(
             args.opponent_decisions_violation_threshold
             if args.opponent_decisions_violation_threshold is not None
@@ -538,6 +605,16 @@ def build_clients_for_profile(
     profile: ModelProfile,
 ) -> tuple[StructuredModelClient, StructuredModelClient]:
     _validate_violation_threshold(profile.decisions_violation_threshold)
+    if profile.evaluator_endpoint_id is not None and profile.evaluator_backend != "diffusion-gemma":
+        raise ValueError(
+            "evaluator_endpoint_id is only supported when "
+            f"evaluator_backend='diffusion-gemma', got {profile.evaluator_backend!r}"
+        )
+    if profile.decisions_auth != "vertex" and profile.evaluator_backend != "decisions":
+        raise ValueError(
+            f"decisions_auth={profile.decisions_auth!r} is only supported when "
+            f"evaluator_backend='decisions', got {profile.evaluator_backend!r}"
+        )
 
     if profile.mode == "mock":
         return HeuristicMockModelClient(), HeuristicMockModelClient()
@@ -689,7 +766,9 @@ def format_match_report(
         + summary.telemetry.get("team_b_evaluator_calls", 0)
         + summary.telemetry.get("team_b_forced_moves", 0)
     )
-    if "team_a_strategist_calls" in summary.telemetry and team_b_activity > 0:
+    if "team_a_strategist_calls" in summary.telemetry and (
+        team_b_profile is not None or team_b_activity > 0
+    ):
         lines.append(
             f"  {team_a_name}: "
             f"strategist_calls={summary.telemetry.get('team_a_strategist_calls', 0)}, "
