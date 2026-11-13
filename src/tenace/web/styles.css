@@ -1,0 +1,27 @@
+:root {
+  --baize-deep: hsl(156, 44%, 15%);
+  --baize-mid: hsl(156, 40%, 19%);
+  --card-ivory: hsl(42, 33%, 97%);
+  --ink-primary: hsl(210, 24%, 14%);
+  --text-light: hsl(44, 28%, 94%);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(circle at 50% 40%, var(--baize-mid), var(--baize-deep));
+  color: var(--text-light);
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+.table-shell {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 1.5rem;
+}

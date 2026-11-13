@@ -1133,3 +1133,492 @@ def test_gfe_safe_health_route_and_upstream_sdk_errors_map_to_502(
     )
     assert match_genai.status_code == 502
     assert "Upstream model evaluation error" in match_genai.json()["detail"]
+
+
+def test_table_state_exports_and_auction_imperfect_info_visibility() -> None:
+    from tenace.domain.types import card_rank, card_suit, hand_hcp
+
+    assert "TableStateRequest" in server_mod.__all__
+    assert "TableStateResponse" in server_mod.__all__
+    assert hasattr(server_mod, "TableStateRequest")
+    assert hasattr(server_mod, "TableStateResponse")
+
+    app = create_app(default_profile=_mock_profile(), default_dds_worlds=1)
+    client = TestClient(app)
+
+    runner = DuplicateMatchRunner(tournament_seed=42, use_double_dummy_result=False)
+    board2 = runner._new_dealt_board_state(2)
+    dealt = _dealt_hands(board2)
+    expected_south_sorted = [
+        action_label(c)
+        for c in sorted(dealt[Seat.SOUTH], key=lambda cid: (-int(card_suit(cid)), -card_rank(cid)))
+    ]
+
+    resp = client.post(
+        "/v1/table/state",
+        json={
+            "tournament_seed": 42,
+            "board_number": 2,
+            "action_history": [],
+            "viewer_seat": "SOUTH",
+            "reveal_all": False,
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["dealer"] == "EAST"
+    assert body["ns_vulnerable"] is True
+    assert body["ew_vulnerable"] is False
+    assert body["phase"] == "auction"
+    assert body["current_player"] == "EAST"
+    assert body["acting_hand"] == "EAST"
+    assert body["hands"] == {
+        "NORTH": None,
+        "EAST": None,
+        "SOUTH": expected_south_sorted,
+        "WEST": None,
+    }
+    assert body["hand_hcp"] == {
+        "NORTH": None,
+        "EAST": None,
+        "SOUTH": hand_hcp(dealt[Seat.SOUTH]),
+        "WEST": None,
+    }
+    assert body["remaining_counts"] == {
+        "NORTH": 13,
+        "EAST": 13,
+        "SOUTH": 13,
+        "WEST": 13,
+    }
+    assert body["initial_hands"] is None
+    assert body["auction_calls"] == []
+    assert body["contract"] is None
+    assert body["ns_tricks"] == 0
+    assert body["ew_tricks"] == 0
+    assert body["current_trick"] == []
+    assert body["completed_tricks"] == []
+    assert body["terminal_result"] is None
+    assert len(body["legal_actions"]) == 36
+    assert body["legal_actions"][0] == {"action_id": PASS_ACTION, "label": "Pass"}
+    assert body["legal_actions"][1]["label"] == "1C"
+    assert body["legal_actions"][-1]["label"] == "7NT"
+
+    # With reveal_all=True, all 4 hands, HCPs, and initial_hands are exposed
+    resp_reveal = client.post(
+        "/v1/table/state",
+        json={
+            "tournament_seed": 42,
+            "board_number": 2,
+            "action_history": [],
+            "viewer_seat": "SOUTH",
+            "reveal_all": True,
+        },
+    )
+    assert resp_reveal.status_code == 200
+    rev_body = resp_reveal.json()
+    for s in Seat:
+        assert rev_body["hands"][s.name] is not None
+        assert len(rev_body["hands"][s.name]) == 13
+        assert rev_body["hand_hcp"][s.name] == hand_hcp(dealt[s])
+        assert rev_body["initial_hands"][s.name] == rev_body["hands"][s.name]
+
+
+def test_table_state_pre_lead_vs_post_lead_dummy_and_acting_hand() -> None:
+    from tenace.domain.types import hand_hcp
+
+    app = create_app(default_profile=_mock_profile(), default_dds_worlds=1)
+    client = TestClient(app)
+
+    # Board 3: South deals, E/W vulnerable
+    runner = DuplicateMatchRunner(tournament_seed=42, use_double_dummy_result=False)
+    state = runner._new_dealt_board_state(3)
+    dealt = _dealt_hands(state)
+
+    auction = ["1NT", "Pass", "Pass", "Pass"]
+    for tok in auction:
+        state.apply_action(parse_action_token(tok))
+
+    # 1. Pre-lead: contract is 1NT by SOUTH (dummy NORTH), West is on opening lead;
+    # dummy NORTH must STILL be hidden!
+    pre_lead = client.post(
+        "/v1/table/state",
+        json={
+            "tournament_seed": 42,
+            "board_number": 3,
+            "action_history": auction,
+            "viewer_seat": "SOUTH",
+            "reveal_all": False,
+        },
+    )
+    assert pre_lead.status_code == 200
+    pre_body = pre_lead.json()
+    assert pre_body["dealer"] == "SOUTH"
+    assert pre_body["ns_vulnerable"] is False
+    assert pre_body["ew_vulnerable"] is True
+    assert pre_body["phase"] == "play"
+    assert pre_body["current_player"] == "WEST"
+    assert pre_body["acting_hand"] == "WEST"
+    assert pre_body["contract"] == {
+        "level": 1,
+        "trump": "NT",
+        "doubled": "",
+        "declarer": "SOUTH",
+        "dummy": "NORTH",
+        "formatted": "1NT by SOUTH",
+    }
+    assert pre_body["hands"]["NORTH"] is None
+    assert pre_body["hand_hcp"]["NORTH"] is None
+    assert pre_body["hands"]["SOUTH"] is not None
+    assert len(pre_body["auction_calls"]) == 4
+    assert pre_body["auction_calls"][0] == {
+        "seat": "SOUTH",
+        "label": "1NT",
+        "action_id": parse_action_token("1NT"),
+    }
+
+    # Verify doubled and redoubled contract metadata formatting
+    dbl_resp = client.post(
+        "/v1/table/state",
+        json={
+            "tournament_seed": 42,
+            "board_number": 3,
+            "action_history": ["1H", "Dbl", "Pass", "Pass", "Pass"],
+            "viewer_seat": "SOUTH",
+        },
+    )
+    assert dbl_resp.status_code == 200
+    assert dbl_resp.json()["contract"]["doubled"] == "X"
+    assert dbl_resp.json()["contract"]["formatted"] == "1HX by SOUTH"
+
+    rdbl_resp = client.post(
+        "/v1/table/state",
+        json={
+            "tournament_seed": 42,
+            "board_number": 3,
+            "action_history": ["1H", "Dbl", "RDbl", "Pass", "Pass", "Pass"],
+            "viewer_seat": "SOUTH",
+        },
+    )
+    assert rdbl_resp.status_code == 200
+    assert rdbl_resp.json()["contract"]["doubled"] == "XX"
+    assert rdbl_resp.json()["contract"]["formatted"] == "1HXX by SOUTH"
+
+    # Verify partnership first-denomination declarer rule (South opens 1NT, North raises 3NT -> South is declarer!)
+    raise_resp = client.post(
+        "/v1/table/state",
+        json={
+            "tournament_seed": 42,
+            "board_number": 3,
+            "action_history": ["1NT", "Pass", "3NT", "Pass", "Pass", "Pass"],
+            "viewer_seat": "SOUTH",
+        },
+    )
+    assert raise_resp.status_code == 200
+    assert raise_resp.json()["contract"] == {
+        "level": 3,
+        "trump": "NT",
+        "doubled": "",
+        "declarer": "SOUTH",
+        "dummy": "NORTH",
+        "formatted": "3NT by SOUTH",
+    }
+
+    # 2. Post-lead: West leads first legal card -> dummy NORTH becomes visible,
+    # and current_player is SOUTH (declarer) while physical acting_hand is NORTH (dummy)!
+    west_lead_id = state.legal_actions()[0]
+    west_lead_lbl = action_label(west_lead_id)
+    state.apply_action(west_lead_id)
+
+    post_lead = client.post(
+        "/v1/table/state",
+        json={
+            "tournament_seed": 42,
+            "board_number": 3,
+            "action_history": [*auction, west_lead_lbl],
+            "viewer_seat": "SOUTH",
+            "reveal_all": False,
+        },
+    )
+    assert post_lead.status_code == 200
+    post_body = post_lead.json()
+    assert post_body["phase"] == "play"
+    assert post_body["current_player"] == "SOUTH"
+    assert post_body["acting_hand"] == "NORTH"
+    assert post_body["hands"]["NORTH"] is not None
+    assert len(post_body["hands"]["NORTH"]) == 13
+    assert post_body["hand_hcp"]["NORTH"] == hand_hcp(dealt[Seat.NORTH])
+    assert post_body["hands"]["EAST"] is None
+    assert post_body["hands"]["WEST"] is None
+    assert post_body["remaining_counts"] == {
+        "NORTH": 13,
+        "EAST": 13,
+        "SOUTH": 13,
+        "WEST": 12,
+    }
+    assert post_body["current_trick"] == [
+        {"seat": "WEST", "card": west_lead_lbl, "action_id": west_lead_id}
+    ]
+    legal_ids = {item["action_id"] for item in post_body["legal_actions"]}
+    assert legal_ids <= set(dealt[Seat.NORTH])
+
+
+def test_table_state_completed_tricks_passed_out_and_terminal_deal_reveal() -> None:
+    app = create_app(default_profile=_mock_profile(), default_dds_worlds=1)
+    client = TestClient(app)
+
+    # 1. Passed out board
+    po_resp = client.post(
+        "/v1/table/state",
+        json={
+            "tournament_seed": 42,
+            "board_number": 1,
+            "action_history": ["Pass", "Pass", "Pass", "Pass"],
+            "viewer_seat": "SOUTH",
+            "reveal_all": False,
+        },
+    )
+    assert po_resp.status_code == 200
+    po_body = po_resp.json()
+    assert po_body["phase"] == "terminal"
+    assert po_body["current_player"] is None
+    assert po_body["acting_hand"] is None
+    assert po_body["legal_actions"] == []
+    assert po_body["contract"]["formatted"] == "Passed Out"
+    assert po_body["terminal_result"] == {
+        "ns_score": 0,
+        "ew_score": 0,
+        "contract": "Passed Out",
+        "ns_tricks": 0,
+        "ew_tricks": 0,
+    }
+    assert po_body["initial_hands"] is not None
+    for s in Seat:
+        assert len(po_body["hands"][s.name]) == 13
+        assert len(po_body["initial_hands"][s.name]) == 13
+
+    # 2. Play 1 trick and then full 13 tricks to terminal
+    runner = DuplicateMatchRunner(tournament_seed=42, use_double_dummy_result=False)
+    state = runner._new_dealt_board_state(1)
+    history: list[int] = []
+    for tok in ("1NT", "Pass", "Pass", "Pass"):
+        aid = parse_action_token(tok)
+        state.apply_action(aid)
+        history.append(aid)
+
+    # Play 4 cards (Trick 1)
+    for _ in range(4):
+        c = state.legal_actions()[0]
+        state.apply_action(c)
+        history.append(c)
+
+    t1_resp = client.post(
+        "/v1/table/state",
+        json={
+            "tournament_seed": 42,
+            "board_number": 1,
+            "action_history": history,
+            "viewer_seat": "SOUTH",
+        },
+    )
+    assert t1_resp.status_code == 200
+    t1_body = t1_resp.json()
+    assert t1_body["phase"] == "play"
+    assert t1_body["current_trick"] == []
+    assert len(t1_body["completed_tricks"]) == 1
+    trick1 = t1_body["completed_tricks"][0]
+    assert trick1["trick_number"] == 1
+    assert trick1["leader"] == "EAST"
+    assert len(trick1["cards"]) == 4
+    assert t1_body["ns_tricks"] + t1_body["ew_tricks"] == 1
+    assert t1_body["acting_hand"] == trick1["winner"]
+
+    # Play remaining 48 cards to terminal
+    while not state.is_terminal():
+        c = state.legal_actions()[0]
+        state.apply_action(c)
+        history.append(c)
+
+    term_resp = client.post(
+        "/v1/table/state",
+        json={
+            "tournament_seed": 42,
+            "board_number": 1,
+            "action_history": history,
+            "viewer_seat": "SOUTH",
+            "reveal_all": False,
+        },
+    )
+    assert term_resp.status_code == 200
+    term_body = term_resp.json()
+    assert term_body["phase"] == "terminal"
+    assert term_body["current_player"] is None
+    assert term_body["acting_hand"] is None
+    assert term_body["legal_actions"] == []
+    assert len(term_body["completed_tricks"]) == 13
+    assert term_body["ns_tricks"] + term_body["ew_tricks"] == 13
+    assert term_body["remaining_counts"] == {
+        "NORTH": 0,
+        "EAST": 0,
+        "SOUTH": 0,
+        "WEST": 0,
+    }
+    assert term_body["hands"] == {
+        "NORTH": [],
+        "EAST": [],
+        "SOUTH": [],
+        "WEST": [],
+    }
+    assert term_body["initial_hands"] is not None
+    for s in Seat:
+        assert len(term_body["initial_hands"][s.name]) == 13
+        assert term_body["hand_hcp"][s.name] is not None
+    assert term_body["terminal_result"] == {
+        "ns_score": round(state.returns()[0]),
+        "ew_score": round(state.returns()[1]),
+        "contract": "1NT by NORTH",
+        "ns_tricks": term_body["ns_tricks"],
+        "ew_tricks": term_body["ew_tricks"],
+    }
+
+
+def test_table_state_rejects_invalid_requests_with_422() -> None:
+    app = create_app(default_profile=_mock_profile(), default_dds_worlds=1)
+    client = TestClient(app)
+
+    invalid_payloads: list[dict[str, object]] = [
+        {"board_number": 0},
+        {"board_number": 1025},
+        {"board_number": True},
+        {"tournament_seed": -1},
+        {"tournament_seed": False},
+        {"viewer_seat": "CENTER"},
+        {"unexpected": 1},
+        {"action_history": ["9NT"]},
+        {"action_history": ["1NT", "1C"]},
+        {"action_history": ["S:A"]},
+        {"action_history": ["Pass", "Pass", "Pass", "Pass", "Pass"]},
+        {"action_history": ["1NT", "Pass", "Pass", "Pass", "S:A", "S:A"]},
+    ]
+    for payload in invalid_payloads:
+        resp = client.post("/v1/table/state", json=payload)
+        assert resp.status_code == 422, f"Expected 422 for {payload}, got {resp.status_code}"
+
+
+def test_step_baseline_bot_option_uses_zero_llm_calls_and_skips_client_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_called(_profile: ModelProfile) -> object:
+        raise AssertionError("build_clients_for_profile must NOT run when bot='baseline'")
+
+    monkeypatch.setattr(server_mod, "build_clients_for_profile", fail_if_called)
+
+    # Even with vertex default profile and no GCP credentials, bot='baseline' succeeds cleanly
+    app = create_app(
+        default_profile=ModelProfile(mode="vertex", project=None),
+        default_dds_worlds=4,
+    )
+    client = TestClient(app)
+
+    # 1. Auction step -> chooses Pass with 0 LLM calls
+    r_auc = client.post(
+        "/v1/step",
+        json={
+            "seat": "NORTH",
+            "board_number": 1,
+            "tournament_seed": 42,
+            "action_history": [],
+            "bot": "baseline",
+        },
+    )
+    assert r_auc.status_code == 200
+    auc_body = r_auc.json()
+    assert auc_body["action_label"] == "Pass"
+    assert auc_body["action_id"] == PASS_ACTION
+    assert auc_body["phase"] == "auction"
+    assert auc_body["strategy"] is None
+    assert auc_body["telemetry"] == {
+        "strategist_calls": 0,
+        "evaluator_calls": 0,
+        "forced_moves": 0,
+    }
+
+    # 2. Play step -> plays first legal card, preserves prior_strategy, tracks forced_moves on Trick 13
+    runner = DuplicateMatchRunner(tournament_seed=42, use_double_dummy_result=False)
+    state = runner._new_dealt_board_state(1)
+    history: list[int] = []
+    for tok in ("1NT", "Pass", "Pass", "Pass"):
+        aid = parse_action_token(tok)
+        state.apply_action(aid)
+        history.append(aid)
+    # Advance to Trick 13 (48 play cards played -> 1 legal card remaining for leader!)
+    for _ in range(48):
+        c = state.legal_actions()[0]
+        state.apply_action(c)
+        history.append(c)
+
+    acting_seat = Seat(state.current_player()).name
+    prior_strat = StrategyState(
+        phase="play",
+        plan_summary="Preserve baseline strategy metadata",
+        revision=1,
+    ).model_dump(mode="json")
+
+    r_play = client.post(
+        "/v1/step",
+        json={
+            "seat": acting_seat,
+            "board_number": 1,
+            "tournament_seed": 42,
+            "action_history": history,
+            "prior_strategy": prior_strat,
+            "bot": "baseline",
+        },
+    )
+    assert r_play.status_code == 200
+    play_body = r_play.json()
+    assert play_body["phase"] == "play"
+    assert play_body["action_id"] == state.legal_actions()[0]
+    assert play_body["strategy"] == prior_strat
+    assert play_body["telemetry"] == {
+        "strategist_calls": 0,
+        "evaluator_calls": 0,
+        "forced_moves": 1,
+    }
+
+    # 3. Validation still enforces 422 on wrong seat or invalid bot name
+    assert (
+        client.post(
+            "/v1/step",
+            json={"seat": "EAST", "board_number": 1, "tournament_seed": 42, "bot": "baseline"},
+        ).status_code
+        == 422
+    )
+    assert (
+        client.post(
+            "/v1/step",
+            json={"seat": "NORTH", "board_number": 1, "tournament_seed": 42, "bot": "unknown"},
+        ).status_code
+        == 422
+    )
+
+
+def test_root_index_and_static_web_assets_served() -> None:
+    app = create_app(default_profile=_mock_profile(), default_dds_worlds=1)
+    client = TestClient(app)
+
+    r_root = client.get("/")
+    assert r_root.status_code == 200
+    assert "text/html" in r_root.headers["content-type"]
+    assert "<!doctype html>" in r_root.text.lower()
+    assert "tenace" in r_root.text.lower()
+
+    r_css = client.get("/static/styles.css")
+    assert r_css.status_code == 200
+    assert "text/css" in r_css.headers["content-type"]
+    assert len(r_css.text.strip()) > 0
+
+    r_js = client.get("/static/app.js")
+    assert r_js.status_code == 200
+    assert "javascript" in r_js.headers["content-type"]
+    assert len(r_js.text.strip()) > 0
+

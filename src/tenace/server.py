@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 import os
+from pathlib import Path
 import random
 import threading
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from google.api_core import exceptions as gcp_exceptions
 from google.genai import errors as genai_errors
 from google.genai._gaos.lib import compat_errors
@@ -32,6 +35,7 @@ from tenace.cli import (
 from tenace.domain.types import (
     BIDDING_ACTION_BASE,
     DBL_ACTION,
+    DENOMINATION_CHARS,
     FIRST_CONTRACT_BID_ACTION,
     MAX_ACTION,
     NUM_CARDS,
@@ -41,7 +45,9 @@ from tenace.domain.types import (
     StrategyState,
     Suit,
     action_label,
+    card_rank,
     card_suit,
+    hand_hcp,
 )
 from tenace.harness.duplicate import (
     BridgeSeatBot,
@@ -61,6 +67,9 @@ from tenace.models.clients import StructuredModelClient
 
 SERVICE_VERSION = "0.1.0"
 _MAX_CACHED_PROFILES = 16
+WEB_DIR = Path(__file__).resolve().parent / "web"
+
+SeatName = Literal["NORTH", "EAST", "SOUTH", "WEST"]
 
 _CARD_LABEL_TO_ID: dict[str, int] = {
     action_label(card).upper(): card for card in range(NUM_CARDS)
@@ -74,6 +83,9 @@ __all__ = [
     "MatchResponse",
     "StepRequest",
     "StepResponse",
+    "TableStateRequest",
+    "TableStateResponse",
+    "compute_table_state",
     "create_app",
     "default_dds_worlds_from_env",
     "default_profile_from_env",
@@ -199,7 +211,7 @@ def resolve_server_bind(env: Mapping[str, str] | None = None) -> tuple[str, int]
 class StepRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    seat: Literal["NORTH", "EAST", "SOUTH", "WEST"]
+    seat: SeatName
     board_number: int = Field(default=1, ge=1)
     own_hand: list[int | str] | None = None
     dummy_hand: list[int | str] | None = None
@@ -209,6 +221,7 @@ class StepRequest(BaseModel):
     profile: ModelProfile | None = None
     dds_worlds: int | None = Field(default=None, ge=1, le=256)
     seed: int = 42
+    bot: Literal["tenace", "baseline"] = "tenace"
 
     @field_validator("seat", mode="before")
     @classmethod
@@ -258,10 +271,122 @@ class StepResponse(BaseModel):
 
     action_id: int
     action_label: str
-    seat: Literal["NORTH", "EAST", "SOUTH", "WEST"]
+    seat: SeatName
     phase: Literal["auction", "play"]
     strategy: StrategyState | None
     telemetry: dict[str, int]
+
+
+class TableStateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tournament_seed: int = Field(default=42, ge=0)
+    board_number: int = Field(default=1, ge=1, le=1024)
+    action_history: list[int | str] = Field(default_factory=list)
+    viewer_seat: SeatName = "SOUTH"
+    reveal_all: bool = False
+
+    @field_validator("viewer_seat", mode="before")
+    @classmethod
+    def _normalize_viewer_seat(cls, value: Any) -> Any:
+        if type(value) is Seat:
+            return value.name
+        if isinstance(value, str):
+            return value.strip().upper()
+        return value
+
+    @field_validator("tournament_seed", "board_number", mode="before")
+    @classmethod
+    def _reject_bool_ints(cls, value: Any) -> Any:
+        if isinstance(value, bool):
+            raise ValueError("Boolean value is not valid for integer field")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_action_tokens(self) -> TableStateRequest:
+        for tok in self.action_history:
+            parse_action_token(tok)
+        return self
+
+
+class AuctionCallView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    seat: SeatName
+    label: str
+    action_id: int
+
+
+class ContractView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    level: int | None
+    trump: Literal["C", "D", "H", "S", "NT"] | None
+    doubled: Literal["", "X", "XX"] = ""
+    declarer: SeatName | None
+    dummy: SeatName | None
+    formatted: str
+
+
+class TrickCardView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    seat: SeatName
+    card: str
+    action_id: int
+
+
+class CompletedTrickView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    trick_number: int
+    leader: SeatName
+    winner: SeatName
+    cards: list[TrickCardView]
+
+
+class LegalActionView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action_id: int
+    label: str
+
+
+class TerminalResultView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ns_score: int
+    ew_score: int
+    contract: str
+    ns_tricks: int
+    ew_tricks: int
+
+
+class TableStateResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tournament_seed: int
+    board_number: int
+    dealer: SeatName
+    ns_vulnerable: bool
+    ew_vulnerable: bool
+    phase: Literal["auction", "play", "terminal"]
+    viewer_seat: SeatName
+    reveal_all: bool
+    current_player: SeatName | None
+    acting_hand: SeatName | None
+    hands: dict[SeatName, list[str] | None]
+    hand_hcp: dict[SeatName, int | None]
+    remaining_counts: dict[SeatName, int]
+    initial_hands: dict[SeatName, list[str]] | None
+    auction_calls: list[AuctionCallView]
+    contract: ContractView | None
+    ns_tricks: int
+    ew_tricks: int
+    current_trick: list[TrickCardView]
+    completed_tricks: list[CompletedTrickView]
+    legal_actions: list[LegalActionView]
+    terminal_result: TerminalResultView | None
 
 
 class MatchRequest(BaseModel):
@@ -655,6 +780,253 @@ def reconstruct_step_state(
     return board_state, prev_voids, False
 
 
+def _sort_bridge_hand(card_ids: Iterable[int]) -> list[int]:
+    """Sort card IDs in standard Bridge display order: Spades -> Hearts -> Diamonds -> Clubs, A -> 2."""
+    return sorted(card_ids, key=lambda cid: (-int(card_suit(cid)), -card_rank(cid)))
+
+
+def compute_table_state(req: TableStateRequest) -> TableStateResponse:
+    """Compute ground-truth OpenSpiel Bridge table state with strict imperfect-information visibility."""
+    runner = DuplicateMatchRunner(
+        tournament_seed=req.tournament_seed,
+        use_double_dummy_result=False,
+    )
+    board_state = runner._new_dealt_board_state(req.board_number)
+
+    dealer_idx, dealer_vul, non_dealer_vul = _wbf_board_params(req.board_number)
+    dealer_seat = Seat(dealer_idx)
+    dealer_is_ew = (dealer_idx & 1) == 1
+    ns_vulnerable = non_dealer_vul if dealer_is_ew else dealer_vul
+    ew_vulnerable = dealer_vul if dealer_is_ew else non_dealer_vul
+
+    initial_dealt_ids: dict[Seat, list[int]] = {s: [] for s in Seat}
+    for idx, entry in enumerate(board_state.full_history()[:NUM_CARDS]):
+        initial_dealt_ids[Seat(idx % 4)].append(entry.action)
+
+    remaining_ids: dict[Seat, set[int]] = {
+        s: set(initial_dealt_ids[s]) for s in Seat
+    }
+
+    auction_calls: list[AuctionCallView] = []
+    first_denom_bidder: dict[tuple[int, int], Seat] = {}
+    last_bid_seat: Seat | None = None
+    last_bid_action: int | None = None
+    doubled_suffix: Literal["", "X", "XX"] = ""
+    declarer_seat: Seat | None = None
+    dummy_seat: Seat | None = None
+    trump_denom: int | None = None
+    contract_view: ContractView | None = None
+
+    trick_leader: Seat | None = None
+    current_trick_plays: list[tuple[Seat, int]] = []
+    completed_tricks: list[CompletedTrickView] = []
+    ns_tricks = 0
+    ew_tricks = 0
+    total_play_actions = 0
+
+    for step_idx, raw_tok in enumerate(req.action_history):
+        act = parse_action_token(raw_tok)
+        if board_state.is_terminal():
+            raise ValueError(
+                f"Board reached terminal state before action index {step_idx} ({action_label(act)})"
+            )
+        legal = board_state.legal_actions()
+        if act not in legal:
+            acting_name = Seat(board_state.current_player()).name
+            raise ValueError(
+                f"Illegal action {action_label(act)} ({act}) at history index "
+                f"{step_idx} for seat {acting_name}"
+            )
+
+        if board_state.current_phase() == 1:
+            actor = Seat(board_state.current_player())
+            auction_calls.append(
+                AuctionCallView(
+                    seat=actor.name,  # type: ignore[arg-type]
+                    label=action_label(act),
+                    action_id=act,
+                )
+            )
+            if FIRST_CONTRACT_BID_ACTION <= act <= MAX_ACTION:
+                denom = (act - FIRST_CONTRACT_BID_ACTION) % 5
+                key = (actor.partnership, denom)
+                if key not in first_denom_bidder:
+                    first_denom_bidder[key] = actor
+                last_bid_seat = actor
+                last_bid_action = act
+                doubled_suffix = ""
+            elif act == DBL_ACTION:
+                doubled_suffix = "X"
+            elif act == RDBL_ACTION:
+                doubled_suffix = "XX"
+
+            board_state.apply_action(act)
+
+            if board_state.current_phase() == 2 and contract_view is None:
+                assert last_bid_seat is not None and last_bid_action is not None
+                offset = last_bid_action - FIRST_CONTRACT_BID_ACTION
+                contract_level = 1 + offset // 5
+                trump_denom = offset % 5
+                trump_str = DENOMINATION_CHARS[trump_denom]
+                declarer_seat = first_denom_bidder[(last_bid_seat.partnership, trump_denom)]
+                dummy_seat = declarer_seat.partner
+                contract_view = ContractView(
+                    level=contract_level,
+                    trump=trump_str,  # type: ignore[arg-type]
+                    doubled=doubled_suffix,
+                    declarer=declarer_seat.name,  # type: ignore[arg-type]
+                    dummy=dummy_seat.name,  # type: ignore[arg-type]
+                    formatted=f"{contract_level}{trump_str}{doubled_suffix} by {declarer_seat.name}",
+                )
+                trick_leader = Seat((int(declarer_seat) + 1) % 4)
+        else:
+            assert trick_leader is not None
+            hand_seat = Seat((int(trick_leader) + len(current_trick_plays)) % 4)
+            if act not in remaining_ids[hand_seat]:
+                raise ValueError(
+                    f"Card {action_label(act)} played at history index {step_idx} "
+                    f"is not in {hand_seat.name}'s hand"
+                )
+            remaining_ids[hand_seat].remove(act)
+            current_trick_plays.append((hand_seat, act))
+            total_play_actions += 1
+            board_state.apply_action(act)
+
+            if len(current_trick_plays) == 4:
+                winner = trick_winner(current_trick_plays, trump_denom)
+                if winner in (Seat.NORTH, Seat.SOUTH):
+                    ns_tricks += 1
+                else:
+                    ew_tricks += 1
+                completed_tricks.append(
+                    CompletedTrickView(
+                        trick_number=len(completed_tricks) + 1,
+                        leader=trick_leader.name,  # type: ignore[arg-type]
+                        winner=winner.name,  # type: ignore[arg-type]
+                        cards=[
+                            TrickCardView(
+                                seat=seat_p.name,  # type: ignore[arg-type]
+                                card=action_label(card_c),
+                                action_id=card_c,
+                            )
+                            for seat_p, card_c in current_trick_plays
+                        ],
+                    )
+                )
+                trick_leader = winner
+                current_trick_plays = []
+
+    if board_state.is_terminal():
+        phase: Literal["auction", "play", "terminal"] = "terminal"
+        current_player: SeatName | None = None
+        acting_hand: SeatName | None = None
+        legal_actions_view: list[LegalActionView] = []
+        if contract_view is None:
+            contract_view = ContractView(
+                level=None,
+                trump=None,
+                doubled="",
+                declarer=None,
+                dummy=None,
+                formatted="Passed Out",
+            )
+        returns = board_state.returns()
+        terminal_result: TerminalResultView | None = TerminalResultView(
+            ns_score=round(returns[0]),
+            ew_score=round(returns[1]),
+            contract=contract_view.formatted,
+            ns_tricks=ns_tricks,
+            ew_tricks=ew_tricks,
+        )
+    elif board_state.current_phase() == 1:
+        phase = "auction"
+        current_player = Seat(board_state.current_player()).name  # type: ignore[assignment]
+        acting_hand = current_player
+        legal_actions_view = [
+            LegalActionView(action_id=a, label=action_label(a))
+            for a in board_state.legal_actions()
+        ]
+        terminal_result = None
+    else:
+        assert trick_leader is not None
+        phase = "play"
+        current_player = Seat(board_state.current_player()).name  # type: ignore[assignment]
+        acting_hand = Seat(
+            (int(trick_leader) + len(current_trick_plays)) % 4
+        ).name  # type: ignore[assignment]
+        legal_actions_view = [
+            LegalActionView(action_id=a, label=action_label(a))
+            for a in board_state.legal_actions()
+        ]
+        terminal_result = None
+
+    viewer = Seat[req.viewer_seat]
+    show_all = req.reveal_all or (phase == "terminal")
+    visible_seats: set[Seat] = set(Seat) if show_all else {viewer}
+    if dummy_seat is not None and total_play_actions >= 1:
+        visible_seats.add(dummy_seat)
+
+    hands: dict[SeatName, list[str] | None] = {}
+    hand_hcp_map: dict[SeatName, int | None] = {}
+    remaining_counts: dict[SeatName, int] = {}
+    for seat_item in Seat:
+        s_name: SeatName = seat_item.name  # type: ignore[assignment]
+        remaining_counts[s_name] = len(remaining_ids[seat_item])
+        if seat_item in visible_seats:
+            hands[s_name] = [
+                action_label(cid) for cid in _sort_bridge_hand(remaining_ids[seat_item])
+            ]
+            hand_hcp_map[s_name] = hand_hcp(initial_dealt_ids[seat_item])
+        else:
+            hands[s_name] = None
+            hand_hcp_map[s_name] = None
+
+    initial_hands: dict[SeatName, list[str]] | None = (
+        {
+            seat_item.name: [  # type: ignore[misc]
+                action_label(cid) for cid in _sort_bridge_hand(initial_dealt_ids[seat_item])
+            ]
+            for seat_item in Seat
+        }
+        if show_all
+        else None
+    )
+
+    current_trick_view = [
+        TrickCardView(
+            seat=seat_p.name,  # type: ignore[arg-type]
+            card=action_label(card_c),
+            action_id=card_c,
+        )
+        for seat_p, card_c in current_trick_plays
+    ]
+
+    return TableStateResponse(
+        tournament_seed=req.tournament_seed,
+        board_number=req.board_number,
+        dealer=dealer_seat.name,  # type: ignore[arg-type]
+        ns_vulnerable=ns_vulnerable,
+        ew_vulnerable=ew_vulnerable,
+        phase=phase,
+        viewer_seat=req.viewer_seat,
+        reveal_all=req.reveal_all,
+        current_player=current_player,
+        acting_hand=acting_hand,
+        hands=hands,
+        hand_hcp=hand_hcp_map,
+        remaining_counts=remaining_counts,
+        initial_hands=initial_hands,
+        auction_calls=auction_calls,
+        contract=contract_view,
+        ns_tricks=ns_tricks,
+        ew_tricks=ew_tricks,
+        current_trick=current_trick_view,
+        completed_tricks=completed_tricks,
+        legal_actions=legal_actions_view,
+        terminal_result=terminal_result,
+    )
+
+
 def _profile_cache_key(profile: ModelProfile) -> tuple[Any, ...]:
     return (
         profile.mode,
@@ -723,6 +1095,11 @@ def create_app(
         version=SERVICE_VERSION,
         description="Stateless 3-Layer Neuro-Symbolic Contract Bridge HTTP API.",
     )
+    app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
+
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    async def index_page() -> HTMLResponse:
+        return HTMLResponse((WEB_DIR / "index.html").read_text(encoding="utf-8"))
 
     @app.get("/health")
     @app.get("/healthz")
@@ -736,6 +1113,13 @@ def create_app(
             "dds_worlds": resolved_dds_worlds,
         }
 
+    @app.post("/v1/table/state", response_model=TableStateResponse)
+    def table_state_endpoint(req: TableStateRequest) -> TableStateResponse:
+        try:
+            return compute_table_state(req)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     @app.post("/v1/step", response_model=StepResponse)
     def step_endpoint(req: StepRequest) -> StepResponse:
         try:
@@ -744,6 +1128,25 @@ def create_app(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         observer = Seat[req.seat]
+        phase: Literal["auction", "play"] = (
+            "auction" if state.current_phase() == 1 else "play"
+        )
+
+        if req.bot == "baseline":
+            chosen_action = FirstLegalPassBaselineBot(observer).step(state)
+            return StepResponse(
+                action_id=chosen_action,
+                action_label=action_label(chosen_action),
+                seat=req.seat,
+                phase=phase,
+                strategy=req.prior_strategy,
+                telemetry={
+                    "strategist_calls": 0,
+                    "evaluator_calls": 0,
+                    "forced_moves": 1 if len(state.legal_actions()) == 1 else 0,
+                },
+            )
+
         active_profile = req.profile if req.profile is not None else resolved_profile
         active_dds_worlds = (
             req.dds_worlds if req.dds_worlds is not None else resolved_dds_worlds
@@ -768,9 +1171,6 @@ def create_app(
             agent._prev_voids = prev_voids
             agent._dummy_seen = dummy_seen
 
-        phase: Literal["auction", "play"] = (
-            "auction" if state.current_phase() == 1 else "play"
-        )
         try:
             chosen_action = agent.step(state)
         except _UPSTREAM_MODEL_ERRORS as exc:
