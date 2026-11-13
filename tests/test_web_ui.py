@@ -163,6 +163,22 @@ def test_design_system_tokens_suit_palettes_and_anti_trope_guardrails() -> None:
     ):
         assert selector_fragment in css, f"Missing CSS rule fragment: {selector_fragment}"
 
+    # Unused selectors removed & mobile .contract-plaque min-width reset present
+    for unused_selector in (".hand-suit-rows", ".suit-row", ".suit-row-pip"):
+        assert unused_selector not in css, f"Unused CSS selector still present: {unused_selector}"
+
+    mobile_block_match = re.search(
+        r"@media\s*\(\s*max-width:\s*860px\s*\)\s*\{(?P<body>.*)\}\s*@media\s*\(\s*prefers-reduced-motion",
+        css,
+        flags=re.DOTALL,
+    )
+    assert mobile_block_match is not None, "Missing @media (max-width: 860px) block"
+    assert re.search(
+        r"\.contract-plaque\s*\{[^}]*min-width:\s*0\s*;",
+        mobile_block_match.group("body"),
+        flags=re.DOTALL,
+    ), "Missing min-width: 0 on .contract-plaque inside @media (max-width: 860px)"
+
     # Anti-trope checks: zero purple/violet hues or gradient-text clip tropes
     assert "-webkit-background-clip: text" not in css.lower()
     assert "background-clip: text" not in css.lower()
@@ -359,6 +375,36 @@ assert.equal(overridden.project, "cloud-run-active-proj");
 assert.equal(overridden.strategist_model, "gemini-2.5-pro");
 assert.equal(overridden.evaluator_backend, "diffusion-gemma");
 assert.equal(overridden.evaluator_location, "us-central1");
+
+// 8. Whitespace-only model overrides trim BEFORE fallback (never emitting blank model names)
+assert.equal(
+  helpers.buildProfilePayload(
+    {
+      mode: "  vertex  ",
+      strategist_model: "   ",
+      evaluator_backend: "  gemini  ",
+      evaluator_model: "   ",
+    },
+    serverProf,
+    false
+  ),
+  null
+);
+const blankFallbackExplicit = helpers.buildProfilePayload(
+  {
+    mode: "   ",
+    strategist_model: "   ",
+    evaluator_backend: "   ",
+    evaluator_model: "   ",
+  },
+  { ...serverProf, evaluator_backend: "diffusion-gemma", evaluator_model: "custom-diff", evaluator_location: "us-central1", evaluator_endpoint_id: "   " },
+  true
+);
+assert.equal(blankFallbackExplicit.mode, "vertex");
+assert.equal(blankFallbackExplicit.strategist_model, "gemini-4-argon");
+assert.equal(blankFallbackExplicit.evaluator_backend, "diffusion-gemma");
+assert.equal(blankFallbackExplicit.evaluator_model, "custom-diff");
+assert.equal(blankFallbackExplicit.evaluator_endpoint_id, null);
 console.log(JSON.stringify({ ok: true }));
 """
     unit_proc = subprocess.run(
@@ -369,6 +415,323 @@ console.log(JSON.stringify({ ok: true }));
     )
     assert unit_proc.returncode == 0, f"Node unit tests failed:\n{unit_proc.stderr}"
     assert json.loads(unit_proc.stdout.strip()) == {"ok": True}
+
+
+def test_browser_controller_concurrency_tab_abort_and_retry_guards() -> None:
+    node_bin = shutil.which("node") or "/usr/bin/node"
+    dom_harness_script = """
+const assert = require("node:assert/strict");
+const appPath = process.argv[1];
+
+class FakeClassList {
+  constructor() { this.set = new Set(); }
+  add(...tokens) { tokens.forEach((t) => this.set.add(t)); }
+  remove(...tokens) { tokens.forEach((t) => this.set.delete(t)); }
+  toggle(token, force) {
+    if (force === undefined) {
+      if (this.set.has(token)) { this.set.delete(token); return false; }
+      this.set.add(token); return true;
+    }
+    if (force) { this.set.add(token); } else { this.set.delete(token); }
+    return Boolean(force);
+  }
+  contains(token) { return this.set.has(token); }
+}
+
+class FakeElement {
+  constructor(id) {
+    this.id = id;
+    this.value = "";
+    this.checked = id === "four-color-toggle" || id === "lab-double-dummy";
+    this.disabled = false;
+    this.hidden = false;
+    this.textContent = "";
+    this.innerHTML = "";
+    this.attrs = {};
+    this.listeners = {};
+    this.classList = new FakeClassList();
+  }
+  setAttribute(k, v) { this.attrs[k] = String(v); }
+  getAttribute(k) { return this.attrs[k] ?? null; }
+  addEventListener(type, fn) {
+    if (!this.listeners[type]) this.listeners[type] = [];
+    this.listeners[type].push(fn);
+  }
+  async dispatch(type, ev = {}) {
+    const fns = this.listeners[type] || [];
+    for (const fn of fns) {
+      await fn({ preventDefault() {}, target: ev.target || this, ...ev });
+    }
+  }
+}
+
+const elements = new Map();
+function getEl(id) {
+  if (!elements.has(id)) {
+    const el = new FakeElement(id);
+    if (id === "table-mode-select") el.value = "human_vs_tenace";
+    if (id === "board-number-input") el.value = "3";
+    if (id === "seed-input") el.value = "42";
+    if (id === "dds-worlds-input") el.value = "4";
+    if (id === "profile-mode-select") el.value = "mock";
+    if (id === "strategist-model-input") el.value = "gemini-4-argon";
+    if (id === "evaluator-backend-select") el.value = "gemini";
+    if (id === "evaluator-model-input") el.value = "gemini-custom-eval";
+    if (id === "lab-boards-input") el.value = "2";
+    if (id === "lab-seed-input") el.value = "42";
+    if (id === "lab-dds-worlds-input") el.value = "4";
+    if (id === "lab-opponent-select") el.value = "tenace";
+    elements.set(id, el);
+  }
+  return elements.get(id);
+}
+
+const fetchQueue = [];
+const fetchCalls = [];
+function enqueueFetch(matcher, handler) {
+  fetchQueue.push({ matcher, handler });
+}
+
+global.document = {
+  body: new FakeElement("body"),
+  getElementById: (id) => getEl(id),
+};
+global.window = {
+  performance: { now: () => 1000 },
+  setTimeout: () => 1,
+  clearTimeout: () => {},
+  fetch: (url, opts = {}) => {
+    fetchCalls.push({ url, opts });
+    const idx = fetchQueue.findIndex((item) => item.matcher === url);
+    assert.notEqual(idx, -1, `Unexpected fetch to ${url}`);
+    const { handler } = fetchQueue.splice(idx, 1)[0];
+    return handler(url, opts);
+  },
+};
+
+function makeJsonResponse(status, body) {
+  return Promise.resolve({
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: status === 200 ? "OK" : "Error",
+    text: () => Promise.resolve(JSON.stringify(body)),
+  });
+}
+
+const southTurnState = {
+  tournament_seed: 42,
+  board_number: 1,
+  dealer: "SOUTH",
+  ns_vulnerable: false,
+  ew_vulnerable: false,
+  phase: "auction",
+  viewer_seat: "SOUTH",
+  reveal_all: false,
+  current_player: "SOUTH",
+  acting_hand: "SOUTH",
+  hands: { NORTH: null, EAST: null, SOUTH: ["S:A"], WEST: null },
+  hand_hcp: { NORTH: null, EAST: null, SOUTH: 4, WEST: null },
+  remaining_counts: { NORTH: 13, EAST: 13, SOUTH: 13, WEST: 13 },
+  initial_hands: null,
+  auction_calls: [],
+  contract: null,
+  ns_tricks: 0,
+  ew_tricks: 0,
+  current_trick: [],
+  completed_tricks: [],
+  legal_actions: [{ action_id: 52, label: "Pass" }],
+  terminal_result: null,
+};
+
+const westAiTurnState = {
+  ...southTurnState,
+  current_player: "WEST",
+  acting_hand: "WEST",
+  auction_calls: [{ seat: "SOUTH", label: "Pass", action_id: 52 }],
+};
+
+const northAiTurnState = {
+  ...southTurnState,
+  current_player: "NORTH",
+  acting_hand: "NORTH",
+  auction_calls: [
+    { seat: "SOUTH", label: "Pass", action_id: 52 },
+    { seat: "WEST", label: "Pass", action_id: 52 },
+  ],
+};
+
+(async () => {
+  // Initial boot: /health + /v1/table/state
+  enqueueFetch("/health", () =>
+    makeJsonResponse(200, {
+      status: "ok",
+      service: "tenace",
+      version: "0.1.0",
+      default_profile: "mock | L1:gemini-4-argon | L2:gemini/gemini-custom-eval",
+      mode: "mock",
+      dds_worlds: 4,
+      profile: {
+        mode: "mock",
+        project: "proj-test",
+        strategist_location: "global",
+        strategist_model: "gemini-4-argon",
+        evaluator_backend: "gemini",
+        evaluator_location: "global",
+        evaluator_model: "gemini-custom-eval",
+        evaluator_endpoint_id: null,
+        decisions_auth: "vertex",
+        decisions_violation_threshold: 0.7,
+      },
+    })
+  );
+  enqueueFetch("/v1/table/state", () => makeJsonResponse(200, southTurnState));
+
+  require(appPath);
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setImmediate(r));
+
+  // Disable Auto-Play so we control AI steps deterministically
+  await getEl("autoplay-toggle-btn").dispatch("click");
+
+  // 1. #lab-team-b-backend change passes state.serverProfile (resolving gemini-custom-eval!)
+  getEl("lab-team-b-backend").value = "decisions";
+  await getEl("lab-team-b-backend").dispatch("change");
+  assert.equal(getEl("lab-team-b-evaluator").value, "gemini-decision-1");
+  getEl("lab-team-b-backend").value = "gemini";
+  await getEl("lab-team-b-backend").dispatch("change");
+  assert.equal(getEl("lab-team-b-evaluator").value, "gemini-custom-eval");
+
+  // 2. Double-click Pass race guard: while /v1/table/state is in-flight, 2nd human bid MUST be ignored & MUST NOT abort 1st fetch!
+  let resolveHumanStateSync;
+  let firstHumanSignal;
+  enqueueFetch("/v1/table/state", (_url, opts) => {
+    firstHumanSignal = opts.signal;
+    return new Promise((resolve) => {
+      resolveHumanStateSync = () => resolve(makeJsonResponse(200, westAiTurnState));
+    });
+  });
+
+  const fakePassBtn = {
+    disabled: false,
+    getAttribute: (name) => (name === "data-bid-action-id" ? "52" : null),
+    closest: () => fakePassBtn,
+  };
+
+  // First click starts refreshTableState (in-flight)
+  const click1 = getEl("bidding-box").dispatch("click", { target: fakePassBtn });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(firstHumanSignal.aborted, false);
+  const callsAfterClick1 = fetchCalls.length;
+
+  // Rapid second click before DOM/fetch settles must bail out cleanly without aborting click1 or pushing duplicate action!
+  await getEl("bidding-box").dispatch("click", { target: fakePassBtn });
+  assert.equal(firstHumanSignal.aborted, false);
+  assert.equal(fetchCalls.length, callsAfterClick1);
+
+  resolveHumanStateSync();
+  await click1;
+  await new Promise((r) => setImmediate(r));
+  const syncBodyAfterPass = JSON.parse(fetchCalls[callsAfterClick1 - 1].opts.body);
+  assert.deepEqual(syncBodyAfterPass.action_history, [52]);
+
+  // 3. executeAiStep keeps isBusy=true across follow-up refreshTableState, and if refreshTableState fails,
+  //    Retry Step retries refreshTableState WITHOUT wiping the in-progress board!
+  enqueueFetch("/v1/step", () =>
+    makeJsonResponse(200, {
+      action_id: 52,
+      action_label: "Pass",
+      seat: "WEST",
+      phase: "auction",
+      strategy: null,
+      telemetry: { strategist_calls: 0, evaluator_calls: 0, forced_moves: 0 },
+    })
+  );
+  let rejectPostStepSync;
+  enqueueFetch("/v1/table/state", () =>
+    new Promise((_resolve, reject) => {
+      rejectPostStepSync = () => reject(new Error("Transient 502 during state sync"));
+    })
+  );
+
+  const stepPromise = getEl("step-ai-btn").dispatch("click");
+  await new Promise((r) => setImmediate(r));
+  // While follow-up /v1/table/state is still in-flight after /v1/step, Step AI & Undo MUST still be disabled (isBusy=true)!
+  assert.equal(getEl("step-ai-btn").disabled, true);
+  assert.equal(getEl("undo-btn").disabled, true);
+
+  rejectPostStepSync();
+  await stepPromise;
+  await new Promise((r) => setImmediate(r));
+  assert.equal(getEl("error-banner").hidden, false);
+
+  // Clicking Retry Step must call /v1/table/state with BOTH actions [52, 52] preserved (NOT startNewDeal [] and NOT /v1/step)!
+  enqueueFetch("/v1/table/state", () => makeJsonResponse(200, northAiTurnState));
+  await getEl("retry-step-btn").dispatch("click");
+  await new Promise((r) => setImmediate(r));
+  const retryFetch = fetchCalls[fetchCalls.length - 1];
+  assert.equal(retryFetch.url, "/v1/table/state");
+  assert.deepEqual(JSON.parse(retryFetch.opts.body).action_history, [52, 52]);
+
+  // 4. switchTab("lab") aborts an in-flight Tab 1 /v1/step immediately
+  let inFlightStepSignal;
+  enqueueFetch("/v1/step", (_url, opts) => {
+    inFlightStepSignal = opts.signal;
+    return new Promise(() => {}); // hangs until aborted
+  });
+  getEl("step-ai-btn").dispatch("click");
+  await new Promise((r) => setImmediate(r));
+  assert.equal(inFlightStepSignal.aborted, false);
+
+  await getEl("tab-lab").dispatch("click");
+  assert.equal(inFlightStepSignal.aborted, true);
+
+  // 5. handleRunLabMatch guards against double-submit via isLabBusy
+  let resolveMatch;
+  enqueueFetch("/v1/match", () =>
+    new Promise((resolve) => {
+      resolveMatch = () =>
+        resolve(
+          makeJsonResponse(200, {
+            team_a_name: "Tenace-A",
+            team_b_name: "Tenace-B",
+            team_a_profile: "mock",
+            team_b_profile: "mock",
+            summary: {
+              tournament_seed: 42,
+              boards: [],
+              total_imps_team_a: 0,
+              total_imps_team_b: 0,
+              telemetry: {},
+            },
+            report: "OK",
+          })
+        );
+    })
+  );
+
+  const countBeforeMatch = fetchCalls.length;
+  const run1 = getEl("lab-form").dispatch("submit");
+  await new Promise((r) => setImmediate(r));
+  // Second submit while first is in-flight must be ignored!
+  await getEl("lab-form").dispatch("submit");
+  assert.equal(fetchCalls.length, countBeforeMatch + 1);
+
+  resolveMatch();
+  await run1;
+  console.log(JSON.stringify({ controllerOk: true }));
+})().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
+"""
+    proc = subprocess.run(
+        [node_bin, "-e", dom_harness_script, str(APP_JS)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"Browser controller concurrency tests failed:\n{proc.stderr}"
+    assert json.loads(proc.stdout.strip()) == {"controllerOk": True}
 
 
 def test_end_to_end_web_client_api_flow_and_readme_docs() -> None:

@@ -752,7 +752,7 @@ body.classic-deck .on-dark .suit-clubs {
 }
 
 /* ==========================================================================
-   Playing Cards (Visible Fans, Suit Rows & Hidden Card-Back Stacks)
+   Playing Cards (Visible Fans & Hidden Card-Back Stacks)
    ========================================================================== */
 
 .hand-cards-fan {
@@ -762,28 +762,6 @@ body.classic-deck .on-dark .suit-clubs {
   align-items: center;
   justify-content: center;
   min-height: 4.35rem;
-}
-
-/* Compact suit-grouped rows for East / West narrow columns */
-.hand-suit-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 0.28rem;
-}
-
-.suit-row {
-  display: flex;
-  align-items: center;
-  gap: 0.26rem;
-  flex-wrap: wrap;
-  min-height: 1.65rem;
-}
-
-.suit-row-pip {
-  width: 1.15rem;
-  font-size: 0.92rem;
-  text-align: center;
-  flex-shrink: 0;
 }
 
 .playing-card {
@@ -1448,6 +1426,7 @@ body.classic-deck .on-dark .suit-clubs {
   .contract-plaque {
     grid-column: 2;
     grid-row: 1;
+    min-width: 0;
   }
 
   #seat-north {

@@ -214,13 +214,22 @@
       decisions_violation_threshold: 0.7,
     };
 
-    const mode = (uiConfig.mode || base.mode || "vertex").trim();
-    const strategistModel = (uiConfig.strategist_model || base.strategist_model || "gemini-4-argon").trim();
-    const evaluatorBackend = (uiConfig.evaluator_backend || base.evaluator_backend || "decisions").trim();
-    const evaluatorModel = (
-      uiConfig.evaluator_model ||
-      defaultEvaluatorModelForBackend(evaluatorBackend, base)
-    ).trim();
+    const cleanTrim = (val) => (typeof val === "string" ? val.trim() : "");
+    const safeConfig = uiConfig || {};
+
+    const mode = cleanTrim(safeConfig.mode) || cleanTrim(base.mode) || "vertex";
+    const strategistModel =
+      cleanTrim(safeConfig.strategist_model) ||
+      cleanTrim(base.strategist_model) ||
+      "gemini-4-argon";
+    const evaluatorBackend =
+      cleanTrim(safeConfig.evaluator_backend) ||
+      cleanTrim(base.evaluator_backend) ||
+      "decisions";
+    const evaluatorModel =
+      cleanTrim(safeConfig.evaluator_model) ||
+      defaultEvaluatorModelForBackend(evaluatorBackend, base);
+    const endpointId = cleanTrim(base.evaluator_endpoint_id) || null;
 
     const unchanged =
       !forceExplicit &&
@@ -237,15 +246,14 @@
     return {
       mode,
       project: base.project ?? null,
-      strategist_location: base.strategist_location || "global",
+      strategist_location: cleanTrim(base.strategist_location) || "global",
       strategist_model: strategistModel,
       evaluator_backend: evaluatorBackend,
       evaluator_location: resolveEvaluatorLocation(evaluatorBackend, base),
       evaluator_model: evaluatorModel,
-      evaluator_endpoint_id:
-        evaluatorBackend === "diffusion-gemma" ? (base.evaluator_endpoint_id ?? null) : null,
+      evaluator_endpoint_id: evaluatorBackend === "diffusion-gemma" ? endpointId : null,
       decisions_auth:
-        evaluatorBackend === "decisions" ? (base.decisions_auth || "vertex") : "vertex",
+        evaluatorBackend === "decisions" ? (cleanTrim(base.decisions_auth) || "vertex") : "vertex",
       decisions_violation_threshold:
         typeof base.decisions_violation_threshold === "number"
           ? base.decisions_violation_threshold
@@ -305,8 +313,10 @@
     nextFeedId: 1,
 
     tableState: null,
+    tableStateSynced: false,
     prevCompletedTrickCount: 0,
     isBusy: false,
+    isLabBusy: false,
     sessionEpoch: 0,
     activeAbortController: null,
     autoPlayTimerId: null,
@@ -1086,19 +1096,37 @@
   async function refreshTableState(epoch = state.sessionEpoch) {
     const controller = new AbortController();
     state.activeAbortController = controller;
+    state.isBusy = true;
+    state.tableStateSynced = false;
+    if (state.tableState !== null) {
+      renderAll();
+    } else {
+      dom.undoBtn.disabled = true;
+      dom.stepAiBtn.disabled = true;
+      dom.turnSpinner.hidden = false;
+    }
 
     const actionHistory = state.timeline.map((item) => item.action);
-    const ts = await fetchJson("/v1/table/state", {
-      method: "POST",
-      signal: controller.signal,
-      body: JSON.stringify({
-        tournament_seed: state.tournamentSeed,
-        board_number: state.boardNumber,
-        action_history: actionHistory,
-        viewer_seat: "SOUTH",
-        reveal_all: Boolean(state.revealHands),
-      }),
-    });
+    let ts;
+    try {
+      ts = await fetchJson("/v1/table/state", {
+        method: "POST",
+        signal: controller.signal,
+        body: JSON.stringify({
+          tournament_seed: state.tournamentSeed,
+          board_number: state.boardNumber,
+          action_history: actionHistory,
+          viewer_seat: "SOUTH",
+          reveal_all: Boolean(state.revealHands),
+        }),
+      });
+    } catch (err) {
+      if (epoch === state.sessionEpoch) {
+        state.isBusy = false;
+        renderAll();
+      }
+      throw err;
+    }
 
     if (epoch !== state.sessionEpoch) {
       return null;
@@ -1113,6 +1141,8 @@
     }
 
     state.tableState = ts;
+    state.tableStateSynced = true;
+    state.isBusy = false;
     renderAll();
 
     if (
@@ -1151,6 +1181,8 @@
     dom.seedInput.value = String(state.tournamentSeed);
 
     state.timeline = [];
+    state.tableState = null;
+    state.tableStateSynced = false;
     state.priorStrategies = { NORTH: null, EAST: null, SOUTH: null, WEST: null };
     state.telemetryTotals = { strategist_calls: 0, evaluator_calls: 0, forced_moves: 0 };
     state.lastStepLatencyMs = null;
@@ -1170,7 +1202,7 @@
 
   async function submitHumanAction(actionId) {
     const ts = state.tableState;
-    if (state.isBusy || !isHumanDecisionTurn(state.tableMode, ts)) {
+    if (state.isBusy || !state.tableStateSynced || !isHumanDecisionTurn(state.tableMode, ts)) {
       return;
     }
     const legalMatch = (ts.legal_actions || []).find((a) => a.action_id === actionId);
@@ -1189,6 +1221,7 @@
       telemetryDelta: { strategist_calls: 0, evaluator_calls: 0, forced_moves: 0 },
       feedEntryId: null,
     });
+    state.tableStateSynced = false;
 
     const myEpoch = state.sessionEpoch;
     try {
@@ -1196,6 +1229,7 @@
     } catch (err) {
       if (myEpoch === state.sessionEpoch && err.name !== "AbortError") {
         state.timeline.pop();
+        state.tableStateSynced = true;
         showError(`Illegal or failed action: ${err.message}`);
         renderAll();
       }
@@ -1206,6 +1240,7 @@
     const ts = state.tableState;
     if (
       state.isBusy ||
+      !state.tableStateSynced ||
       !ts ||
       ts.phase === "terminal" ||
       isHumanDecisionTurn(state.tableMode, ts)
@@ -1314,8 +1349,8 @@
         telemetryDelta: tel,
         feedEntryId,
       });
+      state.tableStateSynced = false;
 
-      state.isBusy = false;
       await refreshTableState(myEpoch);
     } catch (err) {
       if (myEpoch !== state.sessionEpoch || err.name === "AbortError") {
@@ -1359,6 +1394,7 @@
       }
     }
 
+    state.tableStateSynced = false;
     const myEpoch = state.sessionEpoch;
     try {
       await refreshTableState(myEpoch);
@@ -1480,6 +1516,9 @@
 
   async function handleRunLabMatch(event) {
     event.preventDefault();
+    if (state.isLabBusy) {
+      return;
+    }
 
     const boards = clampInt(dom.labBoardsInput.value, 1, 8, 2);
     const seed = clampSeed(dom.labSeedInput.value, 42);
@@ -1525,6 +1564,7 @@
       );
     }
 
+    state.isLabBusy = true;
     dom.labRunBtn.disabled = true;
     dom.labRunBtn.textContent = "Running Duplicate Match…";
     dom.labResults.innerHTML = `
@@ -1548,6 +1588,7 @@
         </div>
       `;
     } finally {
+      state.isLabBusy = false;
       dom.labRunBtn.disabled = false;
       dom.labRunBtn.textContent = "Run Duplicate IMP Match";
     }
@@ -1567,13 +1608,18 @@
     dom.tabPlay.setAttribute("aria-pressed", String(isPlay));
     dom.tabLab.setAttribute("aria-pressed", String(!isPlay));
 
-    if (!isPlay && state.autoPlayTimerId !== null) {
-      window.clearTimeout(state.autoPlayTimerId);
-      state.autoPlayTimerId = null;
+    if (!isPlay) {
+      cancelPendingAsyncWork();
+      renderAll();
+    } else if (!state.tableStateSynced || !state.tableState) {
+      const myEpoch = state.sessionEpoch;
+      refreshTableState(myEpoch).catch((err) => {
+        if (myEpoch === state.sessionEpoch && err.name !== "AbortError") {
+          showError(`Failed to sync table state: ${err.message}`);
+        }
+      });
     } else if (
-      isPlay &&
       state.autoPlayAi &&
-      state.tableState &&
       state.tableState.phase !== "terminal" &&
       !isHumanDecisionTurn(state.tableMode, state.tableState) &&
       !state.isBusy
@@ -1663,12 +1709,22 @@
       renderAll();
     });
 
-    dom.retryStepBtn.addEventListener("click", () => {
+    dom.retryStepBtn.addEventListener("click", async () => {
+      if (state.isBusy) {
+        return;
+      }
       clearError();
-      if (state.tableState && !isHumanDecisionTurn(state.tableMode, state.tableState)) {
-        executeAiStep();
-      } else {
-        startNewDeal();
+      if (!state.tableStateSynced || !state.tableState) {
+        const myEpoch = state.sessionEpoch;
+        try {
+          await refreshTableState(myEpoch);
+        } catch (err) {
+          if (myEpoch === state.sessionEpoch && err.name !== "AbortError") {
+            showError(`Table state sync failed: ${err.message}`);
+          }
+        }
+      } else if (!isHumanDecisionTurn(state.tableMode, state.tableState)) {
+        await executeAiStep();
       }
     });
 
@@ -1720,7 +1776,7 @@
     dom.labTeamBBackend.addEventListener("change", () => {
       dom.labTeamBEvaluator.value = defaultEvaluatorModelForBackend(
         dom.labTeamBBackend.value,
-        null
+        state.serverProfile
       );
     });
 
