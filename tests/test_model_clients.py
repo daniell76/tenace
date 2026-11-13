@@ -248,15 +248,16 @@ def test_vertex_gemini_client_parses_structured_response():
     assert result.plan_summary == "Investigate 4-4 heart fit"
     assert result.revision == 1
     assert captured["model"] == "gemini-4-argon"
-    assert captured["contents"] == "North opened 1C, East passed."
+    assert captured["contents"].startswith("North opened 1C, East passed.")
+    assert "Respond ONLY with a single valid JSON object matching this JSON Schema:" in captured["contents"]
     assert captured["config"].system_instruction == "You are a Bridge strategist."
     assert captured["config"].temperature == pytest.approx(0.15)
     assert captured["config"].response_mime_type == "application/json"
     assert captured["config"].response_schema is None
-    assert captured["config"].response_json_schema == StrategyState.model_json_schema()
+    assert captured["config"].response_json_schema is None
 
-    # Regression test: real google-genai Vertex serializer must accept StrategyState's JSON schema
-    # (dict[Seat, SeatConstraint] emits "propertyNames", which crashes response_schema=StrategyState).
+    # Regression test: real google-genai Vertex serializer must accept prompt-schema + JSON mime
+    # without triggering Vertex constrained-decoding open-dict failures on StrategyState/TacticalDecision.
     api_client = _api_client.BaseApiClient(
         vertexai=True,
         project="test-bridge-proj",
@@ -269,20 +270,20 @@ def test_vertex_gemini_client_parses_structured_response():
     )
     vertex_payload = genai_models._GenerateContentParameters_to_vertex(api_client, params)
     assert vertex_payload["generationConfig"]["responseMimeType"] == "application/json"
-    assert "responseJsonSchema" in vertex_payload["generationConfig"]
+    assert "responseJsonSchema" not in vertex_payload["generationConfig"]
 
-    # Optional fast Layer-2 thinking configuration (thinking_level / thinking_budget)
-    min_client = VertexGeminiClient(
-        model="gemini-3-flash-preview",
-        thinking_level="MINIMAL",
+    # Layer-2 thinking configuration (thinking_level="LOW" on gemini-3.8-flash / gemini-4-argon)
+    low_client = VertexGeminiClient(
+        model="gemini-3.8-flash",
+        thinking_level="LOW",
         genai_client=fake_genai,
     )
-    min_client.generate_structured("sys", "usr", StrategyState)
+    low_client.generate_structured("sys", "usr", StrategyState)
     assert captured["config"].thinking_config is not None
-    assert str(captured["config"].thinking_config.thinking_level).endswith("MINIMAL")
+    assert str(captured["config"].thinking_config.thinking_level).endswith("LOW")
 
     zero_budget_client = VertexGeminiClient(
-        model="gemini-2.5-flash",
+        model="gemini-4-argon",
         thinking_budget=0,
         genai_client=fake_genai,
     )

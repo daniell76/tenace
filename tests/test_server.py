@@ -137,7 +137,7 @@ def test_env_profile_dds_worlds_and_server_bind_helpers(
             "TENACE_MODE": " mock ",
             "GOOGLE_CLOUD_PROJECT": " example-bridge-project ",
             "TENACE_STRATEGIST_LOCATION": "us-central1",
-            "TENACE_STRATEGIST_MODEL": "gemini-2.5-pro",
+            "TENACE_STRATEGIST_MODEL": "gemini-4-carbon",
             "TENACE_EVALUATOR_BACKEND": "diffusion-gemma",
             "TENACE_EVALUATOR_ENDPOINT_ID": " 1234567890 ",
             "TENACE_DECISIONS_VIOLATION_THRESHOLD": "0.65",
@@ -146,7 +146,7 @@ def test_env_profile_dds_worlds_and_server_bind_helpers(
     assert custom_prof.mode == "mock"
     assert custom_prof.project == "example-bridge-project"
     assert custom_prof.strategist_location == "us-central1"
-    assert custom_prof.strategist_model == "gemini-2.5-pro"
+    assert custom_prof.strategist_model == "gemini-4-carbon"
     assert custom_prof.evaluator_backend == "diffusion-gemma"
     assert custom_prof.evaluator_location == "us-central1"
     assert custom_prof.evaluator_model == DEFAULT_DIFFUSION_MODEL
@@ -218,7 +218,7 @@ def test_healthz_reports_default_profile_and_env_configuration(
         "status": "ok",
         "service": "tenace",
         "version": "0.1.0",
-        "default_profile": "mock | L1:gemini-4-argon | L2:gemini/gemini-2.5-flash",
+        "default_profile": "mock | L1:gemini-4-argon | L2:gemini/gemini-3.8-flash",
         "mode": "mock",
         "dds_worlds": 6,
         "profile": default_profile_from_env().model_dump(mode="json"),
@@ -718,7 +718,7 @@ def test_match_endpoint_baseline_and_head_to_head_and_validation() -> None:
             "opponent": "tenace",
             "team_b_profile": {
                 "mode": "mock",
-                "strategist_model": "gemini-2.5-pro",
+                "strategist_model": "gemini-4-carbon",
                 "evaluator_backend": "gemini",
             },
         },
@@ -727,7 +727,7 @@ def test_match_endpoint_baseline_and_head_to_head_and_validation() -> None:
     h2h_data = resp_h2h.json()
     assert h2h_data["team_a_name"] == "Tenace-A"
     assert h2h_data["team_b_name"] == "Tenace-B"
-    assert h2h_data["team_b_profile"] == "mock | L1:gemini-2.5-pro | L2:gemini/gemini-2.5-flash"
+    assert h2h_data["team_b_profile"] == "mock | L1:gemini-4-carbon | L2:gemini/gemini-3.8-flash"
     assert "team_a_strategist_calls" in h2h_data["summary"]["telemetry"]
     assert "team_b_strategist_calls" in h2h_data["summary"]["telemetry"]
 

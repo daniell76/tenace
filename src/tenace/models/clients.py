@@ -179,15 +179,15 @@ class VertexGeminiClient:
         elif self.thinking_budget is not None:
             thinking_cfg = genai_types.ThinkingConfig(thinking_budget=self.thinking_budget)
 
+        prompt_with_schema = f"{user_prompt.strip()}\n\n{_format_schema_instruction(schema)}"
         resp = self._client.models.generate_content(
             model=self.model,
-            contents=user_prompt,
+            contents=prompt_with_schema,
             config=genai_types.GenerateContentConfig(
                 system_instruction=system_prompt,
                 temperature=self.temperature,
                 thinking_config=thinking_cfg,
                 response_mime_type="application/json",
-                response_json_schema=schema.model_json_schema(),
             ),
         )
         text = getattr(resp, "text", None)

@@ -39,7 +39,8 @@ class TacticalOptionEvaluator:
             "the exact candidate label, balancing Layer 1 strategic goals with Layer 3 "
             "double-dummy baseline EV and make probability.\n"
             "Set `assumption_violated` to true ONLY if board facts contradict a critical "
-            "Layer 1 strategic assumption."
+            "Layer 1 strategic assumption. Keep `rationale` to one brief sentence and leave "
+            "`violation_reason` empty unless `assumption_violated` is true."
         )
 
         dummy_summary = (

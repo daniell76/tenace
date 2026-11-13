@@ -344,3 +344,27 @@ def test_tracked_files_contain_no_sensitive_identifiers() -> None:
             assert match is None, (
                 f"Tracked file {rel_path} contains {description}: {match.group(0)!r}"
             )
+
+
+def test_code_and_docs_contain_no_outdated_gemini_2_5_or_gemini_3_0_models() -> None:
+    outdated_model_re = re.compile(r"gemini-(?:2\.5|3-)", re.IGNORECASE)
+    checked_paths = [
+        REPO_ROOT / "README.md",
+        *sorted((REPO_ROOT / "src").rglob("*")),
+        *sorted((REPO_ROOT / "tests").rglob("*")),
+        *sorted((REPO_ROOT / "terraform").rglob("*")),
+    ]
+    for path in checked_paths:
+        if not path.is_file():
+            continue
+        rel_parts = path.relative_to(REPO_ROOT).parts
+        if any(part in {".terraform", "__pycache__", "local"} for part in rel_parts):
+            continue
+        if path.name == "test_iac_and_container.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        match = outdated_model_re.search(text)
+        assert match is None, (
+            f"Outdated Gemini model reference {match.group(0)!r} found in "
+            f"{path.relative_to(REPO_ROOT)}"
+        )

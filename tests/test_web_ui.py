@@ -202,7 +202,7 @@ def test_health_exposes_structured_model_profile_for_client_autoconfig() -> None
         strategist_model="gemini-4-argon",
         evaluator_backend="gemini",
         evaluator_location="global",
-        evaluator_model="gemini-3-flash-preview",
+        evaluator_model="gemini-3.8-flash",
     )
     client = TestClient(create_app(default_profile=profile, default_dds_worlds=8))
     resp = client.get("/health")
@@ -345,18 +345,19 @@ const serverProf = {
   strategist_model: "gemini-4-argon",
   evaluator_backend: "gemini",
   evaluator_location: "global",
-  evaluator_model: "gemini-3-flash-preview",
+  evaluator_model: "gemini-3.8-flash",
   evaluator_endpoint_id: null,
   decisions_auth: "vertex",
   decisions_violation_threshold: 0.7,
 };
+assert.equal(helpers.defaultEvaluatorModelForBackend("gemini", null), "gemini-3.8-flash");
 assert.equal(
   helpers.buildProfilePayload(
     {
       mode: "vertex",
       strategist_model: "gemini-4-argon",
       evaluator_backend: "gemini",
-      evaluator_model: "gemini-3-flash-preview",
+      evaluator_model: "gemini-3.8-flash",
     },
     serverProf
   ),
@@ -365,14 +366,14 @@ assert.equal(
 const overridden = helpers.buildProfilePayload(
   {
     mode: "vertex",
-    strategist_model: "gemini-2.5-pro",
+    strategist_model: "gemini-3.8-flash",
     evaluator_backend: "diffusion-gemma",
     evaluator_model: "publishers/google/models/diffusiongemma-26b-a4b-it",
   },
   serverProf
 );
 assert.equal(overridden.project, "cloud-run-active-proj");
-assert.equal(overridden.strategist_model, "gemini-2.5-pro");
+assert.equal(overridden.strategist_model, "gemini-3.8-flash");
 assert.equal(overridden.evaluator_backend, "diffusion-gemma");
 assert.equal(overridden.evaluator_location, "us-central1");
 

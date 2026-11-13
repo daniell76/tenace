@@ -497,8 +497,8 @@ def test_cli_parser_defaults_to_vertex_and_gcp_env(monkeypatch):
 
     gem_profile = ModelProfile(evaluator_backend="gemini")
     assert gem_profile.evaluator_location == "global"
-    assert gem_profile.evaluator_model == "gemini-2.5-flash"
-    assert gem_profile.short_label() == "L1:gemini-4-argon | L2:gemini/gemini-2.5-flash"
+    assert gem_profile.evaluator_model == "gemini-3.8-flash"
+    assert gem_profile.short_label() == "L1:gemini-4-argon | L2:gemini/gemini-3.8-flash"
 
     mock_profile = ModelProfile(mode="mock")
     assert (
@@ -612,7 +612,7 @@ def test_cli_vertex_mode_wires_gemini_and_diffusion_gemma_clients(monkeypatch):
             "--strategist-location",
             "global",
             "--strategist-model",
-            "gemini-2.5-pro",
+            "gemini-4-carbon",
             "--evaluator-backend",
             "diffusion-gemma",
             "--evaluator-endpoint-id",
@@ -628,7 +628,7 @@ def test_cli_vertex_mode_wires_gemini_and_diffusion_gemma_clients(monkeypatch):
     assert len(gemini_inits) == 1
     assert gemini_inits[0]["project"] == "proj-alpha"
     assert gemini_inits[0]["location"] == "global"
-    assert gemini_inits[0]["model"] == "gemini-2.5-pro"
+    assert gemini_inits[0]["model"] == "gemini-4-carbon"
     assert len(diffusion_inits) == 1
     assert diffusion_inits[0] == {
         "project": "proj-alpha",
@@ -637,7 +637,7 @@ def test_cli_vertex_mode_wires_gemini_and_diffusion_gemma_clients(monkeypatch):
         "maas_model_name": "publishers/google/models/diffusiongemma-26b-a4b-it",
     }
 
-    # 4. --evaluator-backend gemini WITHOUT overriding --evaluator-model -> defaults to gemini-2.5-flash & global
+    # 4. --evaluator-backend gemini WITHOUT overriding --evaluator-model -> defaults to gemini-3.8-flash & global with LOW thinking
     gemini_inits.clear()
     diffusion_inits.clear()
     rc2 = run_cli(
@@ -664,40 +664,12 @@ def test_cli_vertex_mode_wires_gemini_and_diffusion_gemma_clients(monkeypatch):
     assert gemini_inits[1] == {
         "project": "proj-beta",
         "location": "global",
-        "model": "gemini-2.5-flash",
+        "model": "gemini-3.8-flash",
         "temperature": 0.2,
-        "thinking_budget": 0,
+        "thinking_level": "LOW",
     }
 
-    # 5. --evaluator-backend gemini WITH explicit gemini-3-flash-preview override -> thinking_level="MINIMAL"
-    gemini_inits.clear()
-    rc3_flash = run_cli(
-        [
-            "--mode",
-            "vertex",
-            "--project",
-            "proj-gamma",
-            "--evaluator-backend",
-            "gemini",
-            "--evaluator-model",
-            "gemini-3-flash-preview",
-            "--boards",
-            "1",
-            "--dds-worlds",
-            "1",
-            "--double-dummy",
-        ]
-    )
-    assert rc3_flash == 0
-    assert gemini_inits[1] == {
-        "project": "proj-gamma",
-        "location": "global",
-        "model": "gemini-3-flash-preview",
-        "temperature": 0.2,
-        "thinking_level": "MINIMAL",
-    }
-
-    # 6. --evaluator-backend gemini WITH explicit gemini-2.5-pro override -> keeps default thinking
+    # 5. --evaluator-backend gemini WITH explicit gemini-4-argon override -> thinking_level="LOW"
     gemini_inits.clear()
     rc3 = run_cli(
         [
@@ -708,7 +680,7 @@ def test_cli_vertex_mode_wires_gemini_and_diffusion_gemma_clients(monkeypatch):
             "--evaluator-backend",
             "gemini",
             "--evaluator-model",
-            "gemini-2.5-pro",
+            "gemini-4-argon",
             "--boards",
             "1",
             "--dds-worlds",
@@ -721,8 +693,9 @@ def test_cli_vertex_mode_wires_gemini_and_diffusion_gemma_clients(monkeypatch):
     assert gemini_inits[1] == {
         "project": "proj-gamma",
         "location": "global",
-        "model": "gemini-2.5-pro",
+        "model": "gemini-4-argon",
         "temperature": 0.2,
+        "thinking_level": "LOW",
     }
 
     # 6. Validate --decisions-violation-threshold bounds (strictly between 0.0 and 1.0, finite)
@@ -780,7 +753,7 @@ def test_cli_head_to_head_tenace_opponent_compares_two_model_profiles(monkeypatc
     monkeypatch.setattr(cli_mod, "GeminiDecisionsClient", FakeDecisionsClient)
 
     # 1. Vertex head-to-head: Team A (gemini-4-argon + decisions/gemini-decision-1)
-    #    vs Team B (gemini-2.5-pro + diffusion-gemma/diffusiongemma-26b-a4b-it)
+    #    vs Team B (gemini-3.8-flash + diffusion-gemma/diffusiongemma-26b-a4b-it)
     rc_vertex = run_cli(
         [
             "--mode",
@@ -790,7 +763,7 @@ def test_cli_head_to_head_tenace_opponent_compares_two_model_profiles(monkeypatc
             "--opponent",
             "tenace",
             "--opponent-strategist-model",
-            "gemini-2.5-pro",
+            "gemini-3.8-flash",
             "--opponent-evaluator-backend",
             "diffusion-gemma",
             "--boards",
@@ -803,7 +776,7 @@ def test_cli_head_to_head_tenace_opponent_compares_two_model_profiles(monkeypatc
     assert rc_vertex == 0
     assert len(gemini_inits) == 2
     assert gemini_inits[0]["model"] == "gemini-4-argon"
-    assert gemini_inits[1]["model"] == "gemini-2.5-pro"
+    assert gemini_inits[1]["model"] == "gemini-3.8-flash"
     assert len(decisions_inits) == 1
     assert decisions_inits[0] == {
         "project": "proj-h2h",
@@ -824,7 +797,7 @@ def test_cli_head_to_head_tenace_opponent_compares_two_model_profiles(monkeypatc
     assert "Matchup : Tenace-A vs Tenace-B" in out_vertex
     assert "Team A  : Tenace-A (L1:gemini-4-argon | L2:decisions/gemini-decision-1)" in out_vertex
     assert (
-        "Team B  : Tenace-B (L1:gemini-2.5-pro | L2:diffusion-gemma/diffusiongemma-26b-a4b-it)"
+        "Team B  : Tenace-B (L1:gemini-3.8-flash | L2:diffusion-gemma/diffusiongemma-26b-a4b-it)"
         in out_vertex
     )
     assert "Tenace-A: strategist_calls=" in out_vertex
@@ -904,10 +877,10 @@ def test_main_exits_with_zero_on_mock_smoke(monkeypatch):
 def test_cli_rejects_opponent_override_flags_when_opponent_is_not_tenace():
     opponent_flag_cases = [
         ["--opponent-strategist-location", "us-central1"],
-        ["--opponent-strategist-model", "gemini-2.5-pro"],
+        ["--opponent-strategist-model", "gemini-3.8-flash"],
         ["--opponent-evaluator-backend", "diffusion-gemma"],
         ["--opponent-evaluator-location", "us-central1"],
-        ["--opponent-evaluator-model", "gemini-2.5-flash"],
+        ["--opponent-evaluator-model", "gemini-3.8-flash"],
         ["--opponent-evaluator-endpoint-id", "ep-123"],
         ["--opponent-decisions-auth", "api-key"],
         ["--opponent-decisions-violation-threshold", "0.80"],
@@ -963,9 +936,9 @@ def test_model_profile_endpoint_and_decisions_auth_backend_compatibility_and_sho
     full_path_profile = ModelProfile(
         strategist_model="projects/p/locations/global/publishers/google/models/gemini-4-carbon",
         evaluator_backend="gemini",
-        evaluator_model="projects/p/locations/us-central1/publishers/google/models/gemini-2.5-flash",
+        evaluator_model="projects/p/locations/global/publishers/google/models/gemini-3.8-flash",
     )
-    assert full_path_profile.short_label() == "L1:gemini-4-carbon | L2:gemini/gemini-2.5-flash"
+    assert full_path_profile.short_label() == "L1:gemini-4-carbon | L2:gemini/gemini-3.8-flash"
 
     # 3. decisions_auth != "vertex" rejected on non-decisions backends
     for incompatible_backend in ("diffusion-gemma", "gemini"):
@@ -1006,7 +979,7 @@ def test_model_profile_endpoint_and_decisions_auth_backend_compatibility_and_sho
             "--opponent",
             "tenace",
             "--opponent-strategist-model",
-            "gemini-2.5-pro",
+            "gemini-4-carbon",
         ]
     )
     _, team_b_same = resolve_model_profiles(same_args)
@@ -1143,7 +1116,7 @@ def test_cli_honors_tenace_cloudrun_env_vars_and_cli_overrides_and_rejects_inval
             "--strategist-location",
             "global",
             "--strategist-model",
-            "gemini-2.5-pro",
+            "gemini-4-carbon",
             "--evaluator-backend",
             "decisions",
             "--evaluator-location",
@@ -1161,7 +1134,7 @@ def test_cli_honors_tenace_cloudrun_env_vars_and_cli_overrides_and_rejects_inval
     assert override_args.mode == "vertex"
     assert override_args.project == "cli-proj"
     assert override_args.strategist_location == "global"
-    assert override_args.strategist_model == "gemini-2.5-pro"
+    assert override_args.strategist_model == "gemini-4-carbon"
     assert override_args.evaluator_backend == "decisions"
     assert override_args.evaluator_location == "global"
     assert override_args.evaluator_model == "gemini-decision-exp"

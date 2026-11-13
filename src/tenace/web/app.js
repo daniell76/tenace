@@ -190,7 +190,7 @@
     if (backend === "diffusion-gemma") {
       return "publishers/google/models/diffusiongemma-26b-a4b-it";
     }
-    return "gemini-3-flash-preview";
+    return "gemini-3.8-flash";
   }
 
   function resolveEvaluatorLocation(backend, serverProfile) {
@@ -459,10 +459,10 @@
     dom.labTeamBMode.value = prof.mode || "vertex";
     dom.labTeamBBackend.value = teamBBackend;
     dom.labTeamBStrategist.value =
-      prof.strategist_model === "gemini-2.5-pro" ? "gemini-4-argon" : "gemini-2.5-pro";
+      prof.strategist_model === "gemini-3.8-flash" ? "gemini-4-argon" : "gemini-3.8-flash";
     dom.labTeamBEvaluator.value =
-      teamBBackend === "gemini" && prof.evaluator_model !== "gemini-2.5-flash"
-        ? "gemini-2.5-flash"
+      teamBBackend === "gemini" && prof.evaluator_model !== "gemini-4-argon"
+        ? "gemini-4-argon"
         : defaultEvaluatorModelForBackend(teamBBackend, prof);
   }
 

@@ -39,7 +39,7 @@ T = TypeVar("T", bound=BaseModel)
 DEFAULT_STRATEGIST_MODEL = "gemini-4-argon"
 DEFAULT_DECISIONS_MODEL = "gemini-decision-1"
 DEFAULT_DIFFUSION_MODEL = "publishers/google/models/diffusiongemma-26b-a4b-it"
-DEFAULT_GEMINI_EVALUATOR_MODEL = "gemini-2.5-flash"
+DEFAULT_GEMINI_EVALUATOR_MODEL = "gemini-3.8-flash"
 
 _OPPONENT_TENACE_FLAGS: tuple[tuple[str, str], ...] = (
     ("opponent_strategist_location", "--opponent-strategist-location"),
@@ -725,18 +725,13 @@ def build_clients_for_profile(
             maas_model_name=profile.evaluator_model,
         )
     elif profile.evaluator_backend == "gemini":
-        short_eval = profile.evaluator_model.rsplit("/", 1)[-1].lower()
-        eval_kwargs: dict[str, Any] = {
-            "project": profile.project,
-            "location": profile.evaluator_location,
-            "model": profile.evaluator_model,
-            "temperature": 0.2,
-        }
-        if short_eval.startswith("gemini-3"):
-            eval_kwargs["thinking_level"] = "MINIMAL"
-        elif short_eval.startswith("gemini-2.5-flash"):
-            eval_kwargs["thinking_budget"] = 0
-        evaluator_client = VertexGeminiClient(**eval_kwargs)
+        evaluator_client = VertexGeminiClient(
+            project=profile.project,
+            location=profile.evaluator_location,
+            model=profile.evaluator_model,
+            temperature=0.2,
+            thinking_level="LOW",
+        )
     else:
         raise ValueError(f"Unsupported evaluator_backend: {profile.evaluator_backend!r}")
 
