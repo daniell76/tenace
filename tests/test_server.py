@@ -221,6 +221,7 @@ def test_healthz_reports_default_profile_and_env_configuration(
         "default_profile": "mock | L1:gemini-4-argon | L2:gemini/gemini-2.5-flash",
         "mode": "mock",
         "dds_worlds": 6,
+        "profile": default_profile_from_env().model_dump(mode="json"),
     }
 
 

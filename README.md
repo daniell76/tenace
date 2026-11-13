@@ -155,10 +155,31 @@ Tenace packages both the stateless FastAPI HTTP service (`tenace-serve`) and the
 TENACE_MODE=mock uv run tenace-serve
 ```
 
+### Interactive Web Client (`GET /`)
+
+`tenace-serve` bundles a single-origin Contract Bridge Web Client (`GET /` + `/static/*`) featuring:
+- **Interactive Bridge Table**: Play as `SOUTH` with Tenace `NORTH` as your partner (against either full Tenace `EAST`/`WEST` or zero-LLM Fast Baseline defenders), or watch 4× Tenace AI seats play step-by-step with a 7×5 WBF Bidding Box, 4-color/classic Bridge deck toggle, Undo, and glass-box Layer-1 `StrategyState` + DDS telemetry inspection.
+- **Duplicate IMP Match Lab**: Launch two-room WBF Duplicate IMP benchmarks (`baseline` or head-to-head `Tenace-A` vs `Tenace-B` model profile comparisons) directly from the browser.
+
+```bash
+# 1. Local launch (offline mock mode or live Vertex AI with ADC):
+TENACE_MODE=mock uv run tenace-serve
+# Open http://127.0.0.1:8080/ in your browser
+
+# 2. Cloud Run IAM-authenticated browser launch via local proxy:
+gcloud run services proxy tenace-dev \
+  --project your-gcp-project-id \
+  --region us-central1 \
+  --port 8080
+# Open http://127.0.0.1:8080/ in your browser
+```
+
 ### Stateless HTTP API Endpoints
 
+- `GET /` (and `/static/*`): Bundled interactive Contract Bridge table and Duplicate IMP Match Lab web client.
 - `GET /health` (and `/healthz`): Readiness/liveness check returning service version, execution mode, `dds_worlds`, and active default `ModelProfile` (use `/health` on external Cloud Run `*.run.app` URLs).
-- `POST /v1/step`: Selects the next legal bid or card for a single seat using either imperfect-information hands (`own_hand` + optional post-lead `dummy_hand` + `action_history`) or a deterministic benchmark board (`tournament_seed` + `board_number` + `action_history`). Accepts and returns `StrategyState` (`prior_strategy` -> `strategy`) so horizontally autoscaled Cloud Run instances preserve Layer-1 Strategist caching across turns with zero sticky state.
+- `POST /v1/table/state`: Computes imperfect-information OpenSpiel Bridge table state (`hands`, `hand_hcp`, `auction_calls`, `contract`, `current_trick`, `completed_tricks`, `legal_actions`, and `terminal_result`) filtered strictly to `viewer_seat` and post-lead `dummy` unless `reveal_all=true` or terminal.
+- `POST /v1/step`: Selects the next legal bid or card for a single seat (`bot="tenace"` or `"baseline"`) using either imperfect-information hands (`own_hand` + optional post-lead `dummy_hand` + `action_history`) or a deterministic benchmark board (`tournament_seed` + `board_number` + `action_history`). Accepts and returns `StrategyState` (`prior_strategy` -> `strategy`) so horizontally autoscaled Cloud Run instances preserve Layer-1 Strategist caching across turns with zero sticky state.
 - `POST /v1/match`: Runs a synchronous two-room WBF Duplicate IMP match (`baseline` or head-to-head `tenace` model comparison) and returns structured IMP results, telemetry, and scorecard text.
 
 ### Deploying to Cloud Run (`bootstrap` -> `dev` -> `prod`)

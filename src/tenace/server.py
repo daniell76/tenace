@@ -1188,6 +1188,7 @@ def create_app(
             "default_profile": resolved_profile.short_label(),
             "mode": resolved_profile.mode,
             "dds_worlds": resolved_dds_worlds,
+            "profile": resolved_profile.model_dump(mode="json"),
         }
 
     @app.post("/v1/table/state", response_model=TableStateResponse)

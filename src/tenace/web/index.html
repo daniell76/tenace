@@ -5,21 +5,461 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Tenace 3-Layer Neuro-Symbolic Contract Bridge Table and Duplicate IMP Match Lab."
+      content="Play Contract Bridge interactively with Tenace, inspect live Layer-1 Gemini strategic reasoning and constrained double-dummy rollouts, and run two-room WBF Duplicate IMP benchmarks."
     />
-    <title>Tenace — Contract Bridge Table &amp; Match Lab</title>
+    <title>Tenace — Championship Contract Bridge Table &amp; Duplicate Match Lab</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&amp;family=JetBrains+Mono:wght@400;600;700&amp;family=Plus+Jakarta+Sans:wght@400;500;600;700&amp;display=swap"
+    />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
-    <main id="app-root" class="table-shell">
-      <header class="top-bar">
-        <h1>Tenace Bridge Table</h1>
-        <p class="subtitle">3-Layer Neuro-Symbolic Contract Bridge Client</p>
-      </header>
-      <section id="bridge-stage" aria-label="Contract Bridge Table">
-        <p id="status-banner">Initializing table state…</p>
+    <header class="club-header">
+      <div class="club-header-inner">
+        <div class="brand-group">
+          <div class="brand-mark">
+            <span class="brand-emblem" aria-hidden="true">♠</span>
+            <h1 class="brand-title">Tenace Bridge Club</h1>
+          </div>
+          <p class="brand-tagline">3-Layer Neuro-Symbolic Contract Bridge &amp; Duplicate IMP Lab</p>
+        </div>
+
+        <div class="header-right">
+          <div id="server-health-pill" class="server-status-badge" aria-live="polite">
+            <span id="server-status-dot" class="status-dot"></span>
+            <span id="server-status-text">Connecting to table service…</span>
+          </div>
+
+          <nav id="mode-tabs" class="mode-tabs" aria-label="Workspace Views">
+            <button
+              type="button"
+              id="tab-play"
+              class="mode-tab-btn is-active"
+              aria-pressed="true"
+            >
+              Interactive Table
+            </button>
+            <button
+              type="button"
+              id="tab-lab"
+              class="mode-tab-btn"
+              aria-pressed="false"
+            >
+              Duplicate Match Lab
+            </button>
+          </nav>
+        </div>
+      </div>
+    </header>
+
+    <main id="app-main" class="app-main">
+      <!-- Shared Datalist Suggestions for Editable Model Inputs -->
+      <datalist id="strategist-models-datalist">
+        <option value="gemini-4-argon"></option>
+        <option value="gemini-3-flash-preview"></option>
+        <option value="gemini-2.5-pro"></option>
+        <option value="gemini-2.5-flash"></option>
+      </datalist>
+      <datalist id="evaluator-models-datalist">
+        <option value="gemini-decision-1"></option>
+        <option value="gemini-3-flash-preview"></option>
+        <option value="gemini-2.5-flash"></option>
+        <option value="publishers/google/models/diffusiongemma-26b-a4b-it"></option>
+      </datalist>
+
+      <!-- ================================================================
+           TAB 1: INTERACTIVE BRIDGE TABLE
+           ================================================================ -->
+      <section id="view-play" class="view-panel" aria-label="Interactive Contract Bridge Table">
+        <div class="control-ribbon" role="toolbar" aria-label="Table Deal and AI Controls">
+          <div class="control-cluster">
+            <label class="field-inline" for="table-mode-select">
+              <span>Seats</span>
+              <select id="table-mode-select">
+                <option value="human_vs_tenace">Play as South (vs Tenace E/W)</option>
+                <option value="human_vs_baseline">Play as South · Fast Solo (Baseline E/W)</option>
+                <option value="spectator_tenace">Watch 4× Tenace AI</option>
+              </select>
+            </label>
+
+            <label class="field-inline" for="board-number-input">
+              <span>Board #</span>
+              <input
+                type="number"
+                id="board-number-input"
+                min="1"
+                max="32"
+                step="1"
+                value="1"
+              />
+            </label>
+
+            <label class="field-inline" for="seed-input">
+              <span>Seed</span>
+              <input
+                type="number"
+                id="seed-input"
+                min="0"
+                max="2147483647"
+                step="1"
+                value="42"
+              />
+            </label>
+
+            <button type="button" id="new-deal-btn" class="btn btn-brass">New Deal</button>
+            <button type="button" id="random-deal-btn" class="btn">Random Deal</button>
+          </div>
+
+          <div class="control-cluster">
+            <button type="button" id="undo-btn" class="btn" disabled>Undo</button>
+            <button type="button" id="step-ai-btn" class="btn">Step AI</button>
+            <button
+              type="button"
+              id="autoplay-toggle-btn"
+              class="btn btn-toggle"
+              aria-pressed="true"
+            >
+              Auto-Play AI: On
+            </button>
+
+            <label class="toggle-chip" for="reveal-hands-toggle">
+              <input type="checkbox" id="reveal-hands-toggle" />
+              <span>Reveal All Hands</span>
+            </label>
+
+            <label class="toggle-chip" for="four-color-toggle">
+              <input type="checkbox" id="four-color-toggle" checked />
+              <span>4-Color Deck</span>
+            </label>
+          </div>
+        </div>
+
+        <div id="error-banner" class="error-banner" role="alert" hidden>
+          <span id="error-message-text"></span>
+          <div class="error-banner-actions">
+            <button type="button" id="retry-step-btn" class="btn btn-brass">Retry Step</button>
+            <button type="button" id="dismiss-error-btn" class="btn">Dismiss</button>
+          </div>
+        </div>
+
+        <div class="play-workspace">
+          <!-- Left Column: Felt Table + Bidding Box & Auction History -->
+          <div class="table-column">
+            <div class="baize-rail-frame">
+              <div class="baize-felt">
+                <div class="table-turn-bar" aria-live="polite">
+                  <div id="turn-status-group" class="turn-bar-primary">
+                    <span id="turn-spinner" class="turn-spinner" hidden></span>
+                    <span id="turn-status-text">Dealing Board #1…</span>
+                  </div>
+                  <div class="turn-meta-pills">
+                    <span id="turn-phase-pill" class="badge-tag">Phase: Auction</span>
+                    <span id="turn-latency-pill" class="badge-tag">Last Step: —</span>
+                  </div>
+                </div>
+
+                <div class="compass-grid">
+                  <div class="compass-plaque" aria-label="Board Vulnerability Plaque">
+                    <div id="plaque-board-title" class="plaque-board-title">Board #1</div>
+                    <div id="plaque-dealer-vul" class="plaque-meta-line">
+                      Dealer: N · Vul: None
+                    </div>
+                  </div>
+
+                  <section id="seat-north" class="seat-zone" aria-label="North Hand"></section>
+
+                  <div class="contract-plaque" aria-label="Contract and Tricks Counter">
+                    <div class="contract-plaque-label">Contract &amp; Tricks</div>
+                    <div id="contract-plaque-value" class="contract-plaque-value on-dark">
+                      Auction in progress
+                    </div>
+                    <div id="contract-plaque-tricks" class="contract-plaque-tricks">
+                      N/S 0 — E/W 0
+                    </div>
+                  </div>
+
+                  <section id="seat-west" class="seat-zone" aria-label="West Hand"></section>
+
+                  <section
+                    id="trick-arena"
+                    class="trick-arena"
+                    aria-label="Current Trick Felt Arena"
+                  ></section>
+
+                  <section id="seat-east" class="seat-zone" aria-label="East Hand"></section>
+
+                  <section id="seat-south" class="seat-zone" aria-label="South Hand"></section>
+                </div>
+              </div>
+            </div>
+
+            <div id="auction-tray-wrapper" class="auction-and-bidding-tray">
+              <div class="wood-card on-dark">
+                <div class="section-heading-row">
+                  <h2 class="section-heading">Auction Record</h2>
+                  <span id="auction-dealer-note" class="section-subnote">SAYC Standard</span>
+                </div>
+                <div id="auction-history-grid"></div>
+              </div>
+
+              <div id="bidding-box" class="wood-card" aria-label="WBF Bidding Box"></div>
+
+              <div id="play-tricks-panel" class="wood-card on-dark" hidden>
+                <div class="section-heading-row">
+                  <h2 class="section-heading">Completed Tricks</h2>
+                  <button type="button" id="show-last-trick-btn" class="btn" disabled>
+                    Inspect Last Trick on Felt
+                  </button>
+                </div>
+                <div id="trick-history-list" class="trick-history-list"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Right Rail: Glass-Box AI Strategist & Model Configurator -->
+          <aside class="inspector-rail" aria-label="AI Glass-Box Strategist and Model Profile">
+            <div class="wood-card">
+              <div class="section-heading-row">
+                <h2 class="section-heading">Board Telemetry</h2>
+                <span class="section-subnote">3-Layer Pipeline</span>
+              </div>
+              <div id="telemetry-strip" class="telemetry-strip">
+                <div class="telemetry-stat">
+                  <div id="stat-strategist-calls" class="telemetry-stat-value">0</div>
+                  <div class="telemetry-stat-label">L1 Strategist</div>
+                </div>
+                <div class="telemetry-stat">
+                  <div id="stat-evaluator-calls" class="telemetry-stat-value">0</div>
+                  <div class="telemetry-stat-label">L2 Evaluator</div>
+                </div>
+                <div class="telemetry-stat">
+                  <div id="stat-forced-moves" class="telemetry-stat-value">0</div>
+                  <div class="telemetry-stat-label">L3 Forced</div>
+                </div>
+                <div class="telemetry-stat">
+                  <div id="stat-last-ms" class="telemetry-stat-value">—</div>
+                  <div class="telemetry-stat-label">Step Latency</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="wood-card">
+              <div class="section-heading-row">
+                <h2 class="section-heading">Tenace Model Profile</h2>
+                <button type="button" id="reset-profile-btn" class="btn">Server Default</button>
+              </div>
+              <div class="config-grid">
+                <div class="panel-field">
+                  <label for="profile-mode-select">Execution Mode</label>
+                  <select id="profile-mode-select">
+                    <option value="vertex">vertex (Live AI)</option>
+                    <option value="mock">mock (Offline Heuristic)</option>
+                  </select>
+                </div>
+
+                <div class="panel-field">
+                  <label for="dds-worlds-input">DDS Worlds (1–64)</label>
+                  <input
+                    type="number"
+                    id="dds-worlds-input"
+                    min="1"
+                    max="64"
+                    step="1"
+                    value="8"
+                  />
+                </div>
+
+                <div class="panel-field is-full">
+                  <label for="strategist-model-input">Layer-1 Strategist Model</label>
+                  <input
+                    type="text"
+                    id="strategist-model-input"
+                    list="strategist-models-datalist"
+                    value="gemini-4-argon"
+                  />
+                </div>
+
+                <div class="panel-field">
+                  <label for="evaluator-backend-select">Layer-2 Backend</label>
+                  <select id="evaluator-backend-select">
+                    <option value="gemini">gemini</option>
+                    <option value="decisions">decisions</option>
+                    <option value="diffusion-gemma">diffusion-gemma</option>
+                  </select>
+                </div>
+
+                <div class="panel-field">
+                  <label for="evaluator-model-input">Layer-2 Model</label>
+                  <input
+                    type="text"
+                    id="evaluator-model-input"
+                    list="evaluator-models-datalist"
+                    value="gemini-3-flash-preview"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div class="wood-card">
+              <div class="section-heading-row">
+                <h2 class="section-heading">Glass-Box AI Reasoning</h2>
+                <label class="toggle-chip" for="hide-ew-thoughts-toggle">
+                  <input type="checkbox" id="hide-ew-thoughts-toggle" />
+                  <span>Hide E/W</span>
+                </label>
+              </div>
+              <div id="strategy-feed" class="strategy-feed-list" aria-live="polite">
+                <p class="empty-hand-note">
+                  Layer-1 StrategyState plans, target/threat assessments, and HCP constraints appear here as Tenace seats act.
+                </p>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <!-- ================================================================
+           TAB 2: DUPLICATE IMP MATCH LAB
+           ================================================================ -->
+      <section id="view-lab" class="view-panel" aria-label="Duplicate IMP Match Lab" hidden>
+        <div class="lab-layout">
+          <form id="lab-form" class="wood-card lab-form-stack">
+            <div class="section-heading-row">
+              <h2 class="section-heading">WBF Two-Room Match Runner</h2>
+              <span class="section-subnote">POST /v1/match</span>
+            </div>
+
+            <div class="config-grid">
+              <div class="panel-field">
+                <label for="lab-boards-input">Boards (1–8)</label>
+                <input type="number" id="lab-boards-input" min="1" max="8" value="2" />
+              </div>
+
+              <div class="panel-field">
+                <label for="lab-seed-input">Tournament Seed</label>
+                <input
+                  type="number"
+                  id="lab-seed-input"
+                  min="0"
+                  max="2147483647"
+                  value="42"
+                />
+              </div>
+
+              <div class="panel-field">
+                <label for="lab-dds-worlds-input">DDS Worlds</label>
+                <input type="number" id="lab-dds-worlds-input" min="1" max="64" value="4" />
+              </div>
+
+              <div class="panel-field">
+                <label for="lab-opponent-select">Opponent</label>
+                <select id="lab-opponent-select">
+                  <option value="baseline">Baseline (First-Legal Pass)</option>
+                  <option value="tenace">Tenace-B (Head-to-Head)</option>
+                </select>
+              </div>
+            </div>
+
+            <label class="toggle-chip" for="lab-double-dummy">
+              <input type="checkbox" id="lab-double-dummy" checked />
+              <span>Double-Dummy Fast Play Scoring (uncheck for full 52-card play)</span>
+            </label>
+
+            <fieldset class="team-profile-fieldset">
+              <legend>Team A Profile (Open N/S · Closed E/W)</legend>
+              <div class="config-grid">
+                <div class="panel-field">
+                  <label for="lab-team-a-mode">Mode</label>
+                  <select id="lab-team-a-mode">
+                    <option value="vertex">vertex</option>
+                    <option value="mock">mock</option>
+                  </select>
+                </div>
+                <div class="panel-field">
+                  <label for="lab-team-a-backend">L2 Backend</label>
+                  <select id="lab-team-a-backend">
+                    <option value="gemini">gemini</option>
+                    <option value="decisions">decisions</option>
+                    <option value="diffusion-gemma">diffusion-gemma</option>
+                  </select>
+                </div>
+                <div class="panel-field is-full">
+                  <label for="lab-team-a-strategist">L1 Strategist Model</label>
+                  <input
+                    type="text"
+                    id="lab-team-a-strategist"
+                    list="strategist-models-datalist"
+                    value="gemini-4-argon"
+                  />
+                </div>
+                <div class="panel-field is-full">
+                  <label for="lab-team-a-evaluator">L2 Evaluator Model</label>
+                  <input
+                    type="text"
+                    id="lab-team-a-evaluator"
+                    list="evaluator-models-datalist"
+                    value="gemini-3-flash-preview"
+                  />
+                </div>
+              </div>
+            </fieldset>
+
+            <fieldset id="lab-team-b-fieldset" class="team-profile-fieldset" hidden>
+              <legend>Team B Profile (Open E/W · Closed N/S)</legend>
+              <div class="config-grid">
+                <div class="panel-field">
+                  <label for="lab-team-b-mode">Mode</label>
+                  <select id="lab-team-b-mode">
+                    <option value="vertex">vertex</option>
+                    <option value="mock">mock</option>
+                  </select>
+                </div>
+                <div class="panel-field">
+                  <label for="lab-team-b-backend">L2 Backend</label>
+                  <select id="lab-team-b-backend">
+                    <option value="gemini">gemini</option>
+                    <option value="decisions">decisions</option>
+                    <option value="diffusion-gemma">diffusion-gemma</option>
+                  </select>
+                </div>
+                <div class="panel-field is-full">
+                  <label for="lab-team-b-strategist">L1 Strategist Model</label>
+                  <input
+                    type="text"
+                    id="lab-team-b-strategist"
+                    list="strategist-models-datalist"
+                    value="gemini-2.5-pro"
+                  />
+                </div>
+                <div class="panel-field is-full">
+                  <label for="lab-team-b-evaluator">L2 Evaluator Model</label>
+                  <input
+                    type="text"
+                    id="lab-team-b-evaluator"
+                    list="evaluator-models-datalist"
+                    value="gemini-2.5-flash"
+                  />
+                </div>
+              </div>
+            </fieldset>
+
+            <button type="submit" id="lab-run-btn" class="btn btn-brass">
+              Run Duplicate IMP Match
+            </button>
+          </form>
+
+          <div id="lab-results" class="wood-card on-dark">
+            <p class="empty-hand-note">
+              Configure Boards, Seed, and Team Profiles on the left, then launch a symmetric Open + Closed Room WBF Duplicate IMP benchmark.
+            </p>
+          </div>
+        </div>
       </section>
     </main>
+
     <script src="/static/app.js" defer></script>
   </body>
 </html>
