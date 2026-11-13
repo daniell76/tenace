@@ -11,6 +11,7 @@ from tenace.harness.duplicate import (
     FirstLegalPassBaselineBot,
     MatchSummary,
     RoomTranscript,
+    wbf_board_params,
 )
 from tenace.harness.scoring import score_diff_to_imps
 
@@ -26,4 +27,5 @@ __all__ = [
     "SocketBlueChipController",
     "SubprocessTcpBlueChipController",
     "score_diff_to_imps",
+    "wbf_board_params",
 ]

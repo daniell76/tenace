@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 import os
 from pathlib import Path
 import random
@@ -9,13 +10,22 @@ import threading
 from typing import Any, Literal
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from google.api_core import exceptions as gcp_exceptions
 from google.genai import errors as genai_errors
 from google.genai._gaos.lib import compat_errors
 import pyspiel
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 import uvicorn
 
 _UPSTREAM_MODEL_ERRORS: tuple[type[Exception], ...] = (
@@ -54,7 +64,7 @@ from tenace.harness.duplicate import (
     DuplicateMatchRunner,
     FirstLegalPassBaselineBot,
     MatchSummary,
-    _wbf_board_params,
+    wbf_board_params,
 )
 from tenace.layer1_strategist import SAYC_CONVENTION_CARD
 from tenace.layer3_rules import (
@@ -67,9 +77,12 @@ from tenace.models.clients import StructuredModelClient
 
 SERVICE_VERSION = "0.1.0"
 _MAX_CACHED_PROFILES = 16
+_MAX_INT32 = 2_147_483_647
+_MAX_BOARD_NUMBER = 1024
 WEB_DIR = Path(__file__).resolve().parent / "web"
 
 SeatName = Literal["NORTH", "EAST", "SOUTH", "WEST"]
+StrictToken = StrictInt | StrictStr
 
 _CARD_LABEL_TO_ID: dict[str, int] = {
     action_label(card).upper(): card for card in range(NUM_CARDS)
@@ -212,15 +225,15 @@ class StepRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     seat: SeatName
-    board_number: int = Field(default=1, ge=1)
-    own_hand: list[int | str] | None = None
-    dummy_hand: list[int | str] | None = None
-    tournament_seed: int | None = Field(default=None, ge=0)
-    action_history: list[int | str] = Field(default_factory=list)
+    board_number: int = Field(default=1, ge=1, le=_MAX_BOARD_NUMBER)
+    own_hand: list[StrictToken] | None = None
+    dummy_hand: list[StrictToken] | None = None
+    tournament_seed: int | None = Field(default=None, ge=0, le=_MAX_INT32)
+    action_history: list[StrictToken] = Field(default_factory=list)
     prior_strategy: StrategyState | None = None
     profile: ModelProfile | None = None
     dds_worlds: int | None = Field(default=None, ge=1, le=256)
-    seed: int = 42
+    seed: int = Field(default=42, ge=0, le=_MAX_INT32)
     bot: Literal["tenace", "baseline"] = "tenace"
 
     @field_validator("seat", mode="before")
@@ -280,11 +293,11 @@ class StepResponse(BaseModel):
 class TableStateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    tournament_seed: int = Field(default=42, ge=0)
-    board_number: int = Field(default=1, ge=1, le=1024)
-    action_history: list[int | str] = Field(default_factory=list)
+    tournament_seed: int = Field(default=42, ge=0, le=_MAX_INT32)
+    board_number: int = Field(default=1, ge=1, le=_MAX_BOARD_NUMBER)
+    action_history: list[StrictToken] = Field(default_factory=list)
     viewer_seat: SeatName = "SOUTH"
-    reveal_all: bool = False
+    reveal_all: StrictBool = False
 
     @field_validator("viewer_seat", mode="before")
     @classmethod
@@ -363,6 +376,16 @@ class TerminalResultView(BaseModel):
 
 
 class TableStateResponse(BaseModel):
+    """Imperfect-information Bridge table snapshot for an interactive viewer seat.
+
+     Visibility & phase invariants:
+    - `contract` is `None` while `phase == "auction"`, and populated once the auction
+      finishes (`"Passed Out"` or a played contract such as `"3NT by SOUTH"`).
+    - `legal_actions` contains public calls during `phase == "auction"`, is redacted to
+      `[]` on hidden-seat `phase == "play"` turns when `reveal_all=False` unless
+      `current_player == viewer_seat`, and is `[]` when `phase == "terminal"`.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     tournament_seed: int
@@ -393,9 +416,9 @@ class MatchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     boards: int = Field(default=2, ge=1, le=32)
-    seed: int = 42
+    seed: int = Field(default=42, ge=0, le=_MAX_INT32)
     dds_worlds: int | None = Field(default=None, ge=1, le=64)
-    double_dummy: bool = False
+    double_dummy: StrictBool = False
     opponent: Literal["baseline", "tenace"] = "baseline"
     team_a_profile: ModelProfile | None = None
     team_b_profile: ModelProfile | None = None
@@ -425,11 +448,23 @@ class MatchResponse(BaseModel):
     report: str
 
 
-def _resolve_auction(
+@dataclass(frozen=True)
+class _AuctionTrace:
+    calls: list[AuctionCallView]
+    finished: bool
+    passed_out: bool
+    declarer: Seat | None
+    dummy: Seat | None
+    trump_denom: int | None
+    contract_view: ContractView | None
+
+
+def _trace_auction(
     dealer: int,
     auction_actions: list[int],
-) -> tuple[bool, bool, int | None, int | None]:
+) -> _AuctionTrace:
     bidder = dealer
+    calls: list[AuctionCallView] = []
     last_contract_bid: int | None = None
     last_bidder: int | None = None
     doubled_state: Literal["undoubled", "doubled", "redoubled"] = "undoubled"
@@ -490,15 +525,89 @@ def _resolve_auction(
             trailing_passes = 0
         else:
             raise ValueError(f"Invalid auction action ID: {call}")
+
+        calls.append(
+            AuctionCallView(
+                seat=Seat(bidder).name,  # type: ignore[arg-type]
+                label=action_label(call),
+                action_id=call,
+            )
+        )
         bidder = (bidder + 1) % 4
 
-    if not finished or passed_out:
-        return finished, passed_out, None, None
+    if not finished:
+        return _AuctionTrace(
+            calls=calls,
+            finished=False,
+            passed_out=False,
+            declarer=None,
+            dummy=None,
+            trump_denom=None,
+            contract_view=None,
+        )
+
+    if passed_out:
+        return _AuctionTrace(
+            calls=calls,
+            finished=True,
+            passed_out=True,
+            declarer=None,
+            dummy=None,
+            trump_denom=None,
+            contract_view=ContractView(
+                level=None,
+                trump=None,
+                doubled="",
+                declarer=None,
+                dummy=None,
+                formatted="Passed Out",
+            ),
+        )
 
     assert last_contract_bid is not None and last_bidder is not None
-    trump_denom = (last_contract_bid - FIRST_CONTRACT_BID_ACTION) % 5
-    declarer = first_denom_bidder[(last_bidder & 1, trump_denom)]
-    return True, False, declarer, trump_denom
+    offset = last_contract_bid - FIRST_CONTRACT_BID_ACTION
+    contract_level = 1 + offset // 5
+    trump_denom = offset % 5
+    trump_str = DENOMINATION_CHARS[trump_denom]
+    declarer_seat = Seat(first_denom_bidder[(last_bidder & 1, trump_denom)])
+    dummy_seat = declarer_seat.partner
+    doubled_suffix: Literal["", "X", "XX"] = (
+        "XX"
+        if doubled_state == "redoubled"
+        else "X"
+        if doubled_state == "doubled"
+        else ""
+    )
+    contract_view = ContractView(
+        level=contract_level,
+        trump=trump_str,  # type: ignore[arg-type]
+        doubled=doubled_suffix,
+        declarer=declarer_seat.name,  # type: ignore[arg-type]
+        dummy=dummy_seat.name,  # type: ignore[arg-type]
+        formatted=f"{contract_level}{trump_str}{doubled_suffix} by {declarer_seat.name}",
+    )
+    return _AuctionTrace(
+        calls=calls,
+        finished=True,
+        passed_out=False,
+        declarer=declarer_seat,
+        dummy=dummy_seat,
+        trump_denom=trump_denom,
+        contract_view=contract_view,
+    )
+
+
+def _resolve_auction(
+    dealer: int,
+    auction_actions: list[int],
+) -> tuple[bool, bool, int | None, int | None]:
+    trace = _trace_auction(dealer, auction_actions)
+    return (
+        trace.finished,
+        trace.passed_out,
+        int(trace.declarer) if trace.declarer is not None else None,
+        trace.trump_denom,
+    )
 
 
 def _build_imperfect_info_dealt_state(
@@ -510,7 +619,7 @@ def _build_imperfect_info_dealt_state(
     actions: list[int],
     seed: int,
 ) -> pyspiel.State:
-    dealer, dealer_vul, non_dealer_vul = _wbf_board_params(board_number)
+    dealer, dealer_vul, non_dealer_vul = wbf_board_params(board_number)
 
     seen_play = False
     auction_actions: list[int] = []
@@ -793,7 +902,7 @@ def compute_table_state(req: TableStateRequest) -> TableStateResponse:
     )
     board_state = runner._new_dealt_board_state(req.board_number)
 
-    dealer_idx, dealer_vul, non_dealer_vul = _wbf_board_params(req.board_number)
+    dealer_idx, dealer_vul, non_dealer_vul = wbf_board_params(req.board_number)
     dealer_seat = Seat(dealer_idx)
     dealer_is_ew = (dealer_idx & 1) == 1
     ns_vulnerable = non_dealer_vul if dealer_is_ew else dealer_vul
@@ -807,15 +916,8 @@ def compute_table_state(req: TableStateRequest) -> TableStateResponse:
         s: set(initial_dealt_ids[s]) for s in Seat
     }
 
-    auction_calls: list[AuctionCallView] = []
-    first_denom_bidder: dict[tuple[int, int], Seat] = {}
-    last_bid_seat: Seat | None = None
-    last_bid_action: int | None = None
-    doubled_suffix: Literal["", "X", "XX"] = ""
-    declarer_seat: Seat | None = None
-    dummy_seat: Seat | None = None
-    trump_denom: int | None = None
-    contract_view: ContractView | None = None
+    auction_actions: list[int] = []
+    auction_trace: _AuctionTrace | None = None
 
     trick_leader: Seat | None = None
     current_trick_plays: list[tuple[Seat, int]] = []
@@ -839,48 +941,15 @@ def compute_table_state(req: TableStateRequest) -> TableStateResponse:
             )
 
         if board_state.current_phase() == 1:
-            actor = Seat(board_state.current_player())
-            auction_calls.append(
-                AuctionCallView(
-                    seat=actor.name,  # type: ignore[arg-type]
-                    label=action_label(act),
-                    action_id=act,
-                )
-            )
-            if FIRST_CONTRACT_BID_ACTION <= act <= MAX_ACTION:
-                denom = (act - FIRST_CONTRACT_BID_ACTION) % 5
-                key = (actor.partnership, denom)
-                if key not in first_denom_bidder:
-                    first_denom_bidder[key] = actor
-                last_bid_seat = actor
-                last_bid_action = act
-                doubled_suffix = ""
-            elif act == DBL_ACTION:
-                doubled_suffix = "X"
-            elif act == RDBL_ACTION:
-                doubled_suffix = "XX"
-
+            auction_actions.append(act)
             board_state.apply_action(act)
 
-            if board_state.current_phase() == 2 and contract_view is None:
-                assert last_bid_seat is not None and last_bid_action is not None
-                offset = last_bid_action - FIRST_CONTRACT_BID_ACTION
-                contract_level = 1 + offset // 5
-                trump_denom = offset % 5
-                trump_str = DENOMINATION_CHARS[trump_denom]
-                declarer_seat = first_denom_bidder[(last_bid_seat.partnership, trump_denom)]
-                dummy_seat = declarer_seat.partner
-                contract_view = ContractView(
-                    level=contract_level,
-                    trump=trump_str,  # type: ignore[arg-type]
-                    doubled=doubled_suffix,
-                    declarer=declarer_seat.name,  # type: ignore[arg-type]
-                    dummy=dummy_seat.name,  # type: ignore[arg-type]
-                    formatted=f"{contract_level}{trump_str}{doubled_suffix} by {declarer_seat.name}",
-                )
-                trick_leader = Seat((int(declarer_seat) + 1) % 4)
+            if board_state.current_phase() == 2 and auction_trace is None:
+                auction_trace = _trace_auction(dealer_idx, auction_actions)
+                assert auction_trace.declarer is not None
+                trick_leader = Seat((int(auction_trace.declarer) + 1) % 4)
         else:
-            assert trick_leader is not None
+            assert trick_leader is not None and auction_trace is not None
             hand_seat = Seat((int(trick_leader) + len(current_trick_plays)) % 4)
             if act not in remaining_ids[hand_seat]:
                 raise ValueError(
@@ -893,7 +962,7 @@ def compute_table_state(req: TableStateRequest) -> TableStateResponse:
             board_state.apply_action(act)
 
             if len(current_trick_plays) == 4:
-                winner = trick_winner(current_trick_plays, trump_denom)
+                winner = trick_winner(current_trick_plays, auction_trace.trump_denom)
                 if winner in (Seat.NORTH, Seat.SOUTH):
                     ns_tricks += 1
                 else:
@@ -916,20 +985,19 @@ def compute_table_state(req: TableStateRequest) -> TableStateResponse:
                 trick_leader = winner
                 current_trick_plays = []
 
+    if auction_trace is None:
+        auction_trace = _trace_auction(dealer_idx, auction_actions)
+
+    contract_view = auction_trace.contract_view
+    dummy_seat = auction_trace.dummy
+
     if board_state.is_terminal():
         phase: Literal["auction", "play", "terminal"] = "terminal"
+        show_all = True
         current_player: SeatName | None = None
         acting_hand: SeatName | None = None
         legal_actions_view: list[LegalActionView] = []
-        if contract_view is None:
-            contract_view = ContractView(
-                level=None,
-                trump=None,
-                doubled="",
-                declarer=None,
-                dummy=None,
-                formatted="Passed Out",
-            )
+        assert contract_view is not None
         returns = board_state.returns()
         terminal_result: TerminalResultView | None = TerminalResultView(
             ns_score=round(returns[0]),
@@ -940,6 +1008,7 @@ def compute_table_state(req: TableStateRequest) -> TableStateResponse:
         )
     elif board_state.current_phase() == 1:
         phase = "auction"
+        show_all = req.reveal_all
         current_player = Seat(board_state.current_player()).name  # type: ignore[assignment]
         acting_hand = current_player
         legal_actions_view = [
@@ -950,18 +1019,22 @@ def compute_table_state(req: TableStateRequest) -> TableStateResponse:
     else:
         assert trick_leader is not None
         phase = "play"
+        show_all = req.reveal_all
         current_player = Seat(board_state.current_player()).name  # type: ignore[assignment]
         acting_hand = Seat(
             (int(trick_leader) + len(current_trick_plays)) % 4
         ).name  # type: ignore[assignment]
-        legal_actions_view = [
-            LegalActionView(action_id=a, label=action_label(a))
-            for a in board_state.legal_actions()
-        ]
+        legal_actions_view = (
+            [
+                LegalActionView(action_id=a, label=action_label(a))
+                for a in board_state.legal_actions()
+            ]
+            if (show_all or current_player == req.viewer_seat)
+            else []
+        )
         terminal_result = None
 
     viewer = Seat[req.viewer_seat]
-    show_all = req.reveal_all or (phase == "terminal")
     visible_seats: set[Seat] = set(Seat) if show_all else {viewer}
     if dummy_seat is not None and total_play_actions >= 1:
         visible_seats.add(dummy_seat)
@@ -1016,7 +1089,7 @@ def compute_table_state(req: TableStateRequest) -> TableStateResponse:
         hand_hcp=hand_hcp_map,
         remaining_counts=remaining_counts,
         initial_hands=initial_hands,
-        auction_calls=auction_calls,
+        auction_calls=auction_trace.calls,
         contract=contract_view,
         ns_tricks=ns_tricks,
         ew_tricks=ew_tricks,
@@ -1097,9 +1170,13 @@ def create_app(
     )
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 
-    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-    async def index_page() -> HTMLResponse:
-        return HTMLResponse((WEB_DIR / "index.html").read_text(encoding="utf-8"))
+    @app.get("/", include_in_schema=False)
+    async def index_page() -> FileResponse:
+        return FileResponse(
+            WEB_DIR / "index.html",
+            media_type="text/html; charset=utf-8",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     @app.get("/health")
     @app.get("/healthz")
@@ -1134,12 +1211,17 @@ def create_app(
 
         if req.bot == "baseline":
             chosen_action = FirstLegalPassBaselineBot(observer).step(state)
+            baseline_strategy = (
+                req.prior_strategy
+                if (req.prior_strategy is not None and req.prior_strategy.phase == phase)
+                else None
+            )
             return StepResponse(
                 action_id=chosen_action,
                 action_label=action_label(chosen_action),
                 seat=req.seat,
                 phase=phase,
-                strategy=req.prior_strategy,
+                strategy=baseline_strategy,
                 telemetry={
                     "strategist_calls": 0,
                     "evaluator_calls": 0,

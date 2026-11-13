@@ -23,6 +23,8 @@ from tenace.harness.scoring import score_diff_to_imps
 from tenace.layer1_strategist import format_auction_sequence
 from tenace.layer3_rules import trick_winner
 
+_MAX_INT32 = 2_147_483_647
+
 __all__ = [
     "BoardResult",
     "BridgeSeatBot",
@@ -30,6 +32,7 @@ __all__ = [
     "FirstLegalPassBaselineBot",
     "MatchSummary",
     "RoomTranscript",
+    "wbf_board_params",
 ]
 
 
@@ -184,8 +187,10 @@ def _build_room_transcript(
     )
 
 
-def _wbf_board_params(board_number: int) -> tuple[int, bool, bool]:
+def wbf_board_params(board_number: int) -> tuple[int, bool, bool]:
     """Compute official WBF 16-board dealer & vulnerability flags matching OpenSpiel."""
+    if isinstance(board_number, bool) or not isinstance(board_number, int) or board_number < 1:
+        raise ValueError(f"board_number must be an integer >= 1, got {board_number!r}")
     zero_idx = board_number - 1
     dealer = zero_idx % 4
     vul_code = (zero_idx + zero_idx // 4) % 4  # 0: None, 1: N/S, 2: E/W, 3: All
@@ -197,6 +202,9 @@ def _wbf_board_params(board_number: int) -> tuple[int, bool, bool]:
     return dealer, dealer_vul, non_dealer_vul
 
 
+_wbf_board_params = wbf_board_params
+
+
 class DuplicateMatchRunner:
     """Two-room WBF Duplicate IMP match harness (Open Room & Closed Room)."""
 
@@ -205,8 +213,14 @@ class DuplicateMatchRunner:
         tournament_seed: int = 42,
         use_double_dummy_result: bool = False,
     ) -> None:
-        if isinstance(tournament_seed, bool) or not isinstance(tournament_seed, int):
-            raise ValueError(f"tournament_seed must be an integer, got {tournament_seed!r}")
+        if (
+            isinstance(tournament_seed, bool)
+            or not isinstance(tournament_seed, int)
+            or not (0 <= tournament_seed <= _MAX_INT32)
+        ):
+            raise ValueError(
+                f"tournament_seed must be an integer in [0, {_MAX_INT32}], got {tournament_seed!r}"
+            )
         if not isinstance(use_double_dummy_result, bool):
             raise ValueError("use_double_dummy_result must be a bool")
 
@@ -215,6 +229,14 @@ class DuplicateMatchRunner:
         self._deal_game = pyspiel.load_game("bridge(use_double_dummy_result=false)")
 
     def _new_dealt_board_state(self, board_number: int) -> pyspiel.State:
+        if (
+            isinstance(board_number, bool)
+            or not isinstance(board_number, int)
+            or not (1 <= board_number <= _MAX_INT32)
+        ):
+            raise ValueError(
+                f"board_number must be an integer in [1, {_MAX_INT32}], got {board_number!r}"
+            )
         state = self._deal_game.new_initial_state(
             tournament_seed=self.tournament_seed,
             board_number=board_number,
@@ -232,7 +254,7 @@ class DuplicateMatchRunner:
         # boards (and ignores use_double_dummy_result=True). Replaying the 52 dealt cards
         # onto an explicit parameterized bridge game preserves exact WBF dealer/vul/deal
         # while keeping state.resample_from_infostate() consistent across all 16 boards.
-        dealer, dealer_vul, non_dealer_vul = _wbf_board_params(board_number)
+        dealer, dealer_vul, non_dealer_vul = wbf_board_params(board_number)
         board_game = pyspiel.load_game(
             "bridge",
             {

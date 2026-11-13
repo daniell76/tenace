@@ -1137,11 +1137,18 @@ def test_gfe_safe_health_route_and_upstream_sdk_errors_map_to_502(
 
 def test_table_state_exports_and_auction_imperfect_info_visibility() -> None:
     from tenace.domain.types import card_rank, card_suit, hand_hcp
+    import tenace.harness as harness_pkg
+    import tenace.harness.duplicate as duplicate_mod
 
     assert "TableStateRequest" in server_mod.__all__
     assert "TableStateResponse" in server_mod.__all__
     assert hasattr(server_mod, "TableStateRequest")
     assert hasattr(server_mod, "TableStateResponse")
+    assert "wbf_board_params" in duplicate_mod.__all__
+    assert "wbf_board_params" in harness_pkg.__all__
+    assert server_mod.TableStateResponse.__doc__ is not None
+    assert "contract" in server_mod.TableStateResponse.__doc__
+    assert "legal_actions" in server_mod.TableStateResponse.__doc__
 
     app = create_app(default_profile=_mock_profile(), default_dds_worlds=1)
     client = TestClient(app)
@@ -1222,6 +1229,27 @@ def test_table_state_exports_and_auction_imperfect_info_visibility() -> None:
         assert rev_body["hand_hcp"][s.name] == hand_hcp(dealt[s])
         assert rev_body["initial_hands"][s.name] == rev_body["hands"][s.name]
 
+    # Non-empty in-progress auction ["1NT", "Pass"] on Board 2 (East opens 1NT, South passes -> West's turn):
+    # contract remains None, while public auction legal_actions remain populated even on West's turn!
+    in_prog = client.post(
+        "/v1/table/state",
+        json={
+            "tournament_seed": 42,
+            "board_number": 2,
+            "action_history": ["1NT", "Pass"],
+            "viewer_seat": "SOUTH",
+            "reveal_all": False,
+        },
+    )
+    assert in_prog.status_code == 200
+    in_prog_body = in_prog.json()
+    assert in_prog_body["phase"] == "auction"
+    assert in_prog_body["current_player"] == "WEST"
+    assert in_prog_body["acting_hand"] == "WEST"
+    assert in_prog_body["contract"] is None
+    assert len(in_prog_body["auction_calls"]) == 2
+    assert len(in_prog_body["legal_actions"]) > 0
+
 
 def test_table_state_pre_lead_vs_post_lead_dummy_and_acting_hand() -> None:
     from tenace.domain.types import hand_hcp
@@ -1269,12 +1297,28 @@ def test_table_state_pre_lead_vs_post_lead_dummy_and_acting_hand() -> None:
     assert pre_body["hands"]["NORTH"] is None
     assert pre_body["hand_hcp"]["NORTH"] is None
     assert pre_body["hands"]["SOUTH"] is not None
+    # Hidden-seat play turn (WEST != viewer_seat SOUTH, reveal_all=False) MUST redact legal_actions!
+    assert pre_body["legal_actions"] == []
     assert len(pre_body["auction_calls"]) == 4
     assert pre_body["auction_calls"][0] == {
         "seat": "SOUTH",
         "label": "1NT",
         "action_id": parse_action_token("1NT"),
     }
+
+    # With reveal_all=True on the same pre-lead state, WEST's legal_actions ARE exposed
+    pre_lead_rev = client.post(
+        "/v1/table/state",
+        json={
+            "tournament_seed": 42,
+            "board_number": 3,
+            "action_history": auction,
+            "viewer_seat": "SOUTH",
+            "reveal_all": True,
+        },
+    )
+    assert pre_lead_rev.status_code == 200
+    assert len(pre_lead_rev.json()["legal_actions"]) == 13
 
     # Verify doubled and redoubled contract metadata formatting
     dbl_resp = client.post(
@@ -1360,6 +1404,41 @@ def test_table_state_pre_lead_vs_post_lead_dummy_and_acting_hand() -> None:
     ]
     legal_ids = {item["action_id"] for item in post_body["legal_actions"]}
     assert legal_ids <= set(dealt[Seat.NORTH])
+
+    # 3. Post-lead when viewer_seat == dummy_seat (Board 1: NORTH declarer, SOUTH dummy & viewer):
+    # Dummy SOUTH's cards are visible, NORTH's closed hand is hidden, and legal_actions is []
+    # because current_player is NORTH (!= viewer_seat SOUTH) and reveal_all=False!
+    b1_state = runner._new_dealt_board_state(1)
+    for tok in auction:
+        b1_state.apply_action(parse_action_token(tok))
+    east_lead = b1_state.legal_actions()[0]
+    b1_state.apply_action(east_lead)
+    dummy_card = b1_state.legal_actions()[0]
+    b1_state.apply_action(dummy_card)
+    west_card = b1_state.legal_actions()[0]
+    b1_state.apply_action(west_card)
+
+    for hist_b1, expected_acting_hand in (
+        ([*auction, east_lead], "SOUTH"),
+        ([*auction, east_lead, dummy_card, west_card], "NORTH"),
+    ):
+        viewer_dummy_resp = client.post(
+            "/v1/table/state",
+            json={
+                "tournament_seed": 42,
+                "board_number": 1,
+                "action_history": hist_b1,
+                "viewer_seat": "SOUTH",
+                "reveal_all": False,
+            },
+        )
+        assert viewer_dummy_resp.status_code == 200
+        vd_body = viewer_dummy_resp.json()
+        assert vd_body["current_player"] == "NORTH"
+        assert vd_body["acting_hand"] == expected_acting_hand
+        assert vd_body["hands"]["SOUTH"] is not None
+        assert vd_body["hands"]["NORTH"] is None
+        assert vd_body["legal_actions"] == []
 
 
 def test_table_state_completed_tricks_passed_out_and_terminal_deal_reveal() -> None:
@@ -1490,9 +1569,14 @@ def test_table_state_rejects_invalid_requests_with_422() -> None:
         {"board_number": 1025},
         {"board_number": True},
         {"tournament_seed": -1},
+        {"tournament_seed": 2_147_483_648},
         {"tournament_seed": False},
+        {"reveal_all": "yes"},
+        {"reveal_all": 1},
         {"viewer_seat": "CENTER"},
         {"unexpected": 1},
+        {"action_history": [True]},
+        {"action_history": [False]},
         {"action_history": ["9NT"]},
         {"action_history": ["1NT", "1C"]},
         {"action_history": ["S:A"]},
@@ -1502,6 +1586,45 @@ def test_table_state_rejects_invalid_requests_with_422() -> None:
     for payload in invalid_payloads:
         resp = client.post("/v1/table/state", json=payload)
         assert resp.status_code == 422, f"Expected 422 for {payload}, got {resp.status_code}"
+
+    # Verify int32 bounds and StrictInt/StrictStr/StrictBool across /v1/step, /v1/match, and DuplicateMatchRunner
+    hand_n = [action_label(c) for c in range(0, 13)]
+    hand_s = [action_label(c) for c in range(26, 39)]
+    for bad_step in (
+        {"seat": "NORTH", "board_number": 1, "tournament_seed": 2_147_483_648},
+        {"seat": "NORTH", "board_number": 1, "tournament_seed": 42, "seed": 2_147_483_648},
+        {"seat": "NORTH", "board_number": 1, "tournament_seed": 42, "seed": -1},
+        {"seat": "NORTH", "board_number": 1025, "tournament_seed": 42},
+        {"seat": "NORTH", "board_number": 1, "tournament_seed": 42, "action_history": [True]},
+        {"seat": "NORTH", "board_number": 1, "own_hand": [True, *hand_n[1:]]},
+        {
+            "seat": "NORTH",
+            "board_number": 1,
+            "own_hand": hand_n,
+            "dummy_hand": [False, *hand_s[1:]],
+            "action_history": ["1NT", "Pass", "Pass", "Pass", "D:5"],
+        },
+    ):
+        r_step = client.post("/v1/step", json=bad_step)
+        assert r_step.status_code == 422, f"Expected 422 for step {bad_step}, got {r_step.status_code}"
+
+    for bad_match in (
+        {"seed": 2_147_483_648},
+        {"seed": -1},
+        {"double_dummy": "yes"},
+        {"double_dummy": 1},
+    ):
+        r_match = client.post("/v1/match", json=bad_match)
+        assert r_match.status_code == 422, f"Expected 422 for match {bad_match}, got {r_match.status_code}"
+
+    for bad_runner_seed in (-1, 2_147_483_648):
+        with pytest.raises(ValueError):
+            DuplicateMatchRunner(tournament_seed=bad_runner_seed)
+
+    runner = DuplicateMatchRunner(tournament_seed=42)
+    for bad_board in (0, -1, 2_147_483_648, True):
+        with pytest.raises(ValueError):
+            runner._new_dealt_board_state(bad_board)  # type: ignore[arg-type]
 
 
 def test_step_baseline_bot_option_uses_zero_llm_calls_and_skips_client_build(
@@ -1585,6 +1708,27 @@ def test_step_baseline_bot_option_uses_zero_llm_calls_and_skips_client_build(
         "forced_moves": 1,
     }
 
+    # Stale phase='auction' prior_strategy passed into a 'play' turn resets strategy to None
+    stale_auc_strat = StrategyState(
+        phase="auction",
+        plan_summary="Old auction strategy",
+        revision=1,
+    ).model_dump(mode="json")
+    r_play_from_auc = client.post(
+        "/v1/step",
+        json={
+            "seat": acting_seat,
+            "board_number": 1,
+            "tournament_seed": 42,
+            "action_history": history,
+            "prior_strategy": stale_auc_strat,
+            "bot": "baseline",
+        },
+    )
+    assert r_play_from_auc.status_code == 200
+    assert r_play_from_auc.json()["phase"] == "play"
+    assert r_play_from_auc.json()["strategy"] is None
+
     # 3. Validation still enforces 422 on wrong seat or invalid bot name
     assert (
         client.post(
@@ -1609,6 +1753,7 @@ def test_root_index_and_static_web_assets_served() -> None:
     r_root = client.get("/")
     assert r_root.status_code == 200
     assert "text/html" in r_root.headers["content-type"]
+    assert r_root.headers.get("cache-control") == "no-cache"
     assert "<!doctype html>" in r_root.text.lower()
     assert "tenace" in r_root.text.lower()
 
