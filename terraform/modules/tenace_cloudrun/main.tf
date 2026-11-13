@@ -57,10 +57,19 @@ resource "google_secret_manager_secret_iam_member" "gemini_api_key" {
   member    = "serviceAccount:${google_service_account.runtime.email}"
 }
 
+data "google_project" "current" {
+  provider   = google-beta
+  count      = var.iap_enabled ? 1 : 0
+  project_id = var.project_id
+}
+
 resource "google_cloud_run_v2_service" "api" {
+  provider            = google-beta
   name                = "${var.service_name_prefix}-api-${var.environment}"
   location            = var.region
   project             = var.project_id
+  launch_stage        = var.iap_enabled ? "BETA" : "GA"
+  iap_enabled         = var.iap_enabled
   deletion_protection = var.deletion_protection
   ingress             = "INGRESS_TRAFFIC_ALL"
   labels              = local.common_labels
@@ -155,6 +164,11 @@ resource "google_cloud_run_v2_service" "api" {
       condition     = var.max_instance_count >= var.min_instance_count
       error_message = "max_instance_count must be greater than or equal to min_instance_count."
     }
+
+    precondition {
+      condition     = !(var.iap_enabled && var.allow_unauthenticated)
+      error_message = "iap_enabled and allow_unauthenticated cannot both be true."
+    }
   }
 
   depends_on = [
@@ -171,6 +185,25 @@ resource "google_cloud_run_v2_service_iam_member" "public_invoker" {
   name     = google_cloud_run_v2_service.api.name
   role     = "roles/run.invoker"
   member   = "allUsers"
+}
+
+resource "google_cloud_run_v2_service_iam_member" "iap_service_agent_invoker" {
+  count    = var.iap_enabled ? 1 : 0
+  project  = google_cloud_run_v2_service.api.project
+  location = google_cloud_run_v2_service.api.location
+  name     = google_cloud_run_v2_service.api.name
+  role     = "roles/run.invoker"
+  member   = "serviceAccount:service-${data.google_project.current[0].number}@gcp-sa-iap.iam.gserviceaccount.com"
+}
+
+resource "google_iap_web_cloud_run_service_iam_member" "accessors" {
+  provider               = google-beta
+  for_each               = var.iap_enabled ? toset(var.iap_accessor_members) : toset([])
+  project                = google_cloud_run_v2_service.api.project
+  location               = google_cloud_run_v2_service.api.location
+  cloud_run_service_name = google_cloud_run_v2_service.api.name
+  role                   = "roles/iap.httpsResourceAccessor"
+  member                 = each.value
 }
 
 resource "google_cloud_run_v2_job" "benchmark" {

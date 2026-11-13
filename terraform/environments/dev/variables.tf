@@ -132,6 +132,18 @@ variable "allow_unauthenticated" {
   default     = false
 }
 
+variable "iap_enabled" {
+  description = "Whether to enable Google Cloud Run Native Identity-Aware Proxy (IAP) for browser Google Sign-In."
+  type        = bool
+  default     = false
+}
+
+variable "iap_accessor_members" {
+  description = "IAM members (e.g. user:alice@example.com) granted roles/iap.httpsResourceAccessor on the Cloud Run Service when iap_enabled is true."
+  type        = list(string)
+  default     = []
+}
+
 variable "deletion_protection" {
   description = "Whether deletion protection is enabled on dev Cloud Run resources."
   type        = bool

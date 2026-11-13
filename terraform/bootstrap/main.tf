@@ -6,6 +6,7 @@ locals {
     "cloudbuild.googleapis.com",
     "aiplatform.googleapis.com",
     "iam.googleapis.com",
+    "iap.googleapis.com",
     "secretmanager.googleapis.com",
   ])
 }

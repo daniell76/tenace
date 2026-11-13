@@ -247,6 +247,23 @@ variable "allow_unauthenticated" {
   default     = false
 }
 
+variable "iap_enabled" {
+  description = "Whether to enable Google Cloud Run Native Identity-Aware Proxy (IAP) for browser Google Sign-In."
+  type        = bool
+  default     = false
+}
+
+variable "iap_accessor_members" {
+  description = "IAM members (e.g. user:alice@example.com, domain:example.com) granted roles/iap.httpsResourceAccessor on the Cloud Run Service when iap_enabled is true."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition     = alltrue([for m in var.iap_accessor_members : can(regex("^(user|group|domain|serviceAccount):[^\\s]+$", m))])
+    error_message = "Each entry in iap_accessor_members must be a valid IAM principal such as 'user:name@example.com' or 'domain:example.com'."
+  }
+}
+
 variable "deletion_protection" {
   description = "Whether Cloud Run deletion protection is enabled on the Service and Job."
   type        = bool

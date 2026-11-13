@@ -1,4 +1,11 @@
 mock_provider "google" {}
+mock_provider "google-beta" {
+  mock_data "google_project" {
+    defaults = {
+      number = "123456789012"
+    }
+  }
+}
 
 run "default_decisions_service_and_job" {
   command = plan
@@ -224,6 +231,54 @@ run "rejects_full_resource_path_gemini_api_key_secret_id" {
 
   expect_failures = [
     var.gemini_api_key_secret_id,
+  ]
+}
+
+run "iap_enabled_binds_iap_agent_and_accessors" {
+  command = plan
+
+  variables {
+    project_id           = "your-gcp-project-id"
+    environment          = "dev"
+    container_image      = "us-central1-docker.pkg.dev/your-gcp-project-id/tenace/tenace:latest"
+    iap_enabled          = true
+    iap_accessor_members = ["user:developer@example.com"]
+  }
+
+  assert {
+    condition     = google_cloud_run_v2_service.api.iap_enabled == true
+    error_message = "Expected iap_enabled = true on Cloud Run Service."
+  }
+
+  assert {
+    condition     = google_cloud_run_v2_service.api.launch_stage == "BETA"
+    error_message = "Expected launch_stage = BETA when iap_enabled = true."
+  }
+
+  assert {
+    condition     = length(google_cloud_run_v2_service_iam_member.iap_service_agent_invoker) == 1
+    error_message = "Expected IAP service agent roles/run.invoker binding when iap_enabled = true."
+  }
+
+  assert {
+    condition     = google_iap_web_cloud_run_service_iam_member.accessors["user:developer@example.com"].role == "roles/iap.httpsResourceAccessor"
+    error_message = "Expected roles/iap.httpsResourceAccessor binding for iap_accessor_members."
+  }
+}
+
+run "rejects_iap_with_allow_unauthenticated" {
+  command = plan
+
+  variables {
+    project_id            = "your-gcp-project-id"
+    environment           = "dev"
+    container_image       = "us-central1-docker.pkg.dev/your-gcp-project-id/tenace/tenace:latest"
+    iap_enabled           = true
+    allow_unauthenticated = true
+  }
+
+  expect_failures = [
+    google_cloud_run_v2_service.api,
   ]
 }
 

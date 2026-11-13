@@ -7,5 +7,6 @@ evaluator_backend   = "decisions"
 evaluator_model     = "gemini-decision-1"
 evaluator_location  = "global"
 max_instance_count  = 2
+iap_enabled         = false
 deletion_protection = false
 job_args            = ["--boards", "4"]

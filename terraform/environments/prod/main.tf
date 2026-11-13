@@ -1,5 +1,9 @@
 module "tenace" {
   source = "../../modules/tenace_cloudrun"
+  providers = {
+    google      = google
+    google-beta = google-beta
+  }
 
   project_id                       = var.project_id
   environment                      = "prod"
@@ -24,6 +28,8 @@ module "tenace" {
   max_instance_request_concurrency = var.max_instance_request_concurrency
   request_timeout_seconds          = var.request_timeout_seconds
   allow_unauthenticated            = var.allow_unauthenticated
+  iap_enabled                      = var.iap_enabled
+  iap_accessor_members             = var.iap_accessor_members
   deletion_protection              = var.deletion_protection
   enable_benchmark_job             = var.enable_benchmark_job
   job_cpu                          = var.job_cpu

@@ -44,6 +44,11 @@ run "creates_bucket_and_artifact_registry" {
     condition     = output.artifact_registry_repository_url == "us-central1-docker.pkg.dev/your-gcp-project-id/tenace"
     error_message = "Unexpected artifact_registry_repository_url output."
   }
+
+  assert {
+    condition     = contains(keys(google_project_service.apis), "iap.googleapis.com")
+    error_message = "Expected bootstrap to enable iap.googleapis.com for Cloud Run Native IAP."
+  }
 }
 
 run "reuses_existing_tfstate_bucket" {

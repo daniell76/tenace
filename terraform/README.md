@@ -104,7 +104,7 @@ terraform -chdir=terraform/environments/prod apply \
 
 ## Invoking the Cloud Run Service & Benchmark Job
 
-By default, `allow_unauthenticated = false` so Cloud Run enforces IAM authentication (`roles/run.invoker`).
+By default, `allow_unauthenticated = false` so Cloud Run enforces IAM authentication (`roles/run.invoker`). To enable direct browser Google Sign-In on the interactive Web UI (`GET /`) without `gcloud run services proxy` or SSH port forwarding, set `iap_enabled = true` (and optional `iap_accessor_members = ["user:you@example.com"]`) in your local `terraform.tfvars`.
 
 ### Authenticated HTTP Endpoints (`/health`, `/v1/step`, `/v1/match`)
 
