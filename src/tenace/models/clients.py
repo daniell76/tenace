@@ -116,6 +116,9 @@ def _clean_optional_str(value: Any, name: str) -> str | None:
     return value.strip()
 
 
+_VALID_THINKING_LEVELS = frozenset({"MINIMAL", "LOW", "MEDIUM", "HIGH"})
+
+
 class VertexGeminiClient:
     def __init__(
         self,
@@ -123,6 +126,8 @@ class VertexGeminiClient:
         location: str = "global",
         model: str = "gemini-4-argon",
         temperature: float = 0.2,
+        thinking_level: Literal["MINIMAL", "LOW", "MEDIUM", "HIGH"] | None = None,
+        thinking_budget: int | None = None,
         genai_client: Any | None = None,
     ) -> None:
         cleaned_project = _clean_optional_str(project, "project")
@@ -135,11 +140,23 @@ class VertexGeminiClient:
             or not (0.0 <= temperature <= 2.0)
         ):
             raise ValueError(f"temperature must be between 0.0 and 2.0, got {temperature!r}")
+        if thinking_level is not None and thinking_budget is not None:
+            raise ValueError("Pass at most one of thinking_level or thinking_budget")
+        if thinking_level is not None:
+            if not isinstance(thinking_level, str) or thinking_level not in _VALID_THINKING_LEVELS:
+                raise ValueError(
+                    f"thinking_level must be one of {sorted(_VALID_THINKING_LEVELS)}, got {thinking_level!r}"
+                )
+        if thinking_budget is not None:
+            if isinstance(thinking_budget, bool) or not isinstance(thinking_budget, int) or thinking_budget < 0:
+                raise ValueError(f"thinking_budget must be an integer >= 0, got {thinking_budget!r}")
 
         self.project = cleaned_project
         self.location = cleaned_location
         self.model = cleaned_model
         self.temperature = float(temperature)
+        self.thinking_level = thinking_level
+        self.thinking_budget = thinking_budget
         self._client = (
             genai_client
             if genai_client is not None
@@ -156,12 +173,19 @@ class VertexGeminiClient:
         user_prompt: str,
         schema: type[T],
     ) -> T:
+        thinking_cfg: genai_types.ThinkingConfig | None = None
+        if self.thinking_level is not None:
+            thinking_cfg = genai_types.ThinkingConfig(thinking_level=self.thinking_level)
+        elif self.thinking_budget is not None:
+            thinking_cfg = genai_types.ThinkingConfig(thinking_budget=self.thinking_budget)
+
         resp = self._client.models.generate_content(
             model=self.model,
             contents=user_prompt,
             config=genai_types.GenerateContentConfig(
                 system_instruction=system_prompt,
                 temperature=self.temperature,
+                thinking_config=thinking_cfg,
                 response_mime_type="application/json",
                 response_json_schema=schema.model_json_schema(),
             ),

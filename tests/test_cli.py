@@ -659,14 +659,45 @@ def test_cli_vertex_mode_wires_gemini_and_diffusion_gemma_clients(monkeypatch):
     assert len(diffusion_inits) == 0
     assert len(gemini_inits) == 2
     assert gemini_inits[0]["model"] == "gemini-4-argon"
+    assert "thinking_level" not in gemini_inits[0]
+    assert "thinking_budget" not in gemini_inits[0]
     assert gemini_inits[1] == {
         "project": "proj-beta",
         "location": "global",
         "model": "gemini-2.5-flash",
         "temperature": 0.2,
+        "thinking_budget": 0,
     }
 
-    # 5. --evaluator-backend gemini WITH explicit --evaluator-model override
+    # 5. --evaluator-backend gemini WITH explicit gemini-3-flash-preview override -> thinking_level="MINIMAL"
+    gemini_inits.clear()
+    rc3_flash = run_cli(
+        [
+            "--mode",
+            "vertex",
+            "--project",
+            "proj-gamma",
+            "--evaluator-backend",
+            "gemini",
+            "--evaluator-model",
+            "gemini-3-flash-preview",
+            "--boards",
+            "1",
+            "--dds-worlds",
+            "1",
+            "--double-dummy",
+        ]
+    )
+    assert rc3_flash == 0
+    assert gemini_inits[1] == {
+        "project": "proj-gamma",
+        "location": "global",
+        "model": "gemini-3-flash-preview",
+        "temperature": 0.2,
+        "thinking_level": "MINIMAL",
+    }
+
+    # 6. --evaluator-backend gemini WITH explicit gemini-2.5-pro override -> keeps default thinking
     gemini_inits.clear()
     rc3 = run_cli(
         [
@@ -687,7 +718,12 @@ def test_cli_vertex_mode_wires_gemini_and_diffusion_gemma_clients(monkeypatch):
     )
     assert rc3 == 0
     assert len(gemini_inits) == 2
-    assert gemini_inits[1]["model"] == "gemini-2.5-pro"
+    assert gemini_inits[1] == {
+        "project": "proj-gamma",
+        "location": "global",
+        "model": "gemini-2.5-pro",
+        "temperature": 0.2,
+    }
 
     # 6. Validate --decisions-violation-threshold bounds (strictly between 0.0 and 1.0, finite)
     for bad_thresh in ("0.0", "1.0", "-0.2", "1.5", "nan", "inf", "-inf"):

@@ -384,3 +384,71 @@ def test_select_guarded_action_sanitizes_nonfinite_and_out_of_range_scores():
         )
         == 56
     )
+
+
+def test_auction_score_candidates_batches_dds_per_world_and_matches_exact_scores(monkeypatch):
+    import random
+
+    game = pyspiel.load_game("bridge", {"use_double_dummy_result": False})
+    state = game.new_initial_state()
+    rng = random.Random(99)
+    deck = list(range(52))
+    rng.shuffle(deck)
+    for card in deck:
+        state.apply_action(card)
+
+    # Test both opening turn (36 legal calls) and post-bid competitive turn (with Pass, Dbl, bids)
+    state_after_1d = state.clone()
+    state_after_1d.apply_action(56)  # North bids 1D -> East has Pass, Dbl, 1H..7NT
+
+    for test_state, observer in ((state, Seat.NORTH), (state_after_1d, Seat.EAST)):
+        cands = collapse_equivalent_actions(test_state.legal_actions())
+        assert len(cands) >= 34
+        spot_labels = {"Pass", "Dbl", "1H", "1NT", "3NT", "4S", "7NT"}
+
+        eval_ref = RuleDDSEvaluator(num_worlds=2, rng_seed=123)
+        worlds_ref = eval_ref.sample_consistent_worlds(test_state, observer)
+        expected_evs = {}
+        expected_mps = {}
+        for cand in cands:
+            if cand.label not in spot_labels:
+                continue
+            payoffs = [eval_ref._rollout_value(w, observer, cand.action) for w in worlds_ref]
+            expected_evs[cand.label] = sum(payoffs) / len(payoffs)
+            expected_mps[cand.label] = sum(
+                1.0 if p > 0.0 else (0.5 if p == 0.0 else 0.0) for p in payoffs
+            ) / len(payoffs)
+
+        eval_batched = RuleDDSEvaluator(num_worlds=2, rng_seed=123)
+        dds_call_count = 0
+        orig_sample = eval_batched.sample_consistent_worlds
+
+        class CountingWorldProxy:
+            def __init__(self, inner: pyspiel.State) -> None:
+                self._inner = inner
+
+            def score_for_contracts(self, player: int, contracts: list[int]) -> list[float]:
+                nonlocal dds_call_count
+                dds_call_count += 1
+                return self._inner.score_for_contracts(player, contracts)
+
+            def clone(self) -> object:
+                return CountingWorldProxy(self._inner.clone())
+
+            def __getattr__(self, name: str):
+                return getattr(self._inner, name)
+
+        monkeypatch.setattr(
+            eval_batched,
+            "sample_consistent_worlds",
+            lambda s, obs, strat=None: [CountingWorldProxy(w) for w in orig_sample(s, obs, strat)],
+        )
+
+        scored = eval_batched.score_candidates(test_state, observer, cands)
+        assert len(scored) == len(cands)
+        assert dds_call_count == 2, f"Expected 1 batched DDS call per world (2), got {dds_call_count}"
+        for s_cand in scored:
+            assert s_cand.make_prob is not None
+            if s_cand.label in expected_evs:
+                assert s_cand.baseline_ev == pytest.approx(expected_evs[s_cand.label], abs=1e-9)
+                assert s_cand.make_prob == pytest.approx(expected_mps[s_cand.label], abs=1e-9)

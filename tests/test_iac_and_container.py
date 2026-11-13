@@ -104,6 +104,7 @@ def test_dockerfile_and_dockerignore_cloudrun_hygiene() -> None:
 
     dockerfile = dockerfile_path.read_text(encoding="utf-8")
     assert "FROM python:3.13-slim" in dockerfile
+    assert "procps" in dockerfile
     assert "PORT=8080" in dockerfile
     assert "EXPOSE 8080" in dockerfile
     assert re.search(r"^USER\s+(?!root\b)\S+", dockerfile, re.MULTILINE)

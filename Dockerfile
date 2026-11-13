@@ -4,7 +4,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PORT=8080
 
-RUN useradd --create-home --shell /usr/sbin/nologin tenace
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --shell /usr/sbin/nologin tenace
 
 WORKDIR /app
 

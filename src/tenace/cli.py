@@ -725,12 +725,18 @@ def build_clients_for_profile(
             maas_model_name=profile.evaluator_model,
         )
     elif profile.evaluator_backend == "gemini":
-        evaluator_client = VertexGeminiClient(
-            project=profile.project,
-            location=profile.evaluator_location,
-            model=profile.evaluator_model,
-            temperature=0.2,
-        )
+        short_eval = profile.evaluator_model.rsplit("/", 1)[-1].lower()
+        eval_kwargs: dict[str, Any] = {
+            "project": profile.project,
+            "location": profile.evaluator_location,
+            "model": profile.evaluator_model,
+            "temperature": 0.2,
+        }
+        if short_eval.startswith("gemini-3"):
+            eval_kwargs["thinking_level"] = "MINIMAL"
+        elif short_eval.startswith("gemini-2.5-flash"):
+            eval_kwargs["thinking_budget"] = 0
+        evaluator_client = VertexGeminiClient(**eval_kwargs)
     else:
         raise ValueError(f"Unsupported evaluator_backend: {profile.evaluator_backend!r}")
 

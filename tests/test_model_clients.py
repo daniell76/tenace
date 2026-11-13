@@ -271,6 +271,32 @@ def test_vertex_gemini_client_parses_structured_response():
     assert vertex_payload["generationConfig"]["responseMimeType"] == "application/json"
     assert "responseJsonSchema" in vertex_payload["generationConfig"]
 
+    # Optional fast Layer-2 thinking configuration (thinking_level / thinking_budget)
+    min_client = VertexGeminiClient(
+        model="gemini-3-flash-preview",
+        thinking_level="MINIMAL",
+        genai_client=fake_genai,
+    )
+    min_client.generate_structured("sys", "usr", StrategyState)
+    assert captured["config"].thinking_config is not None
+    assert str(captured["config"].thinking_config.thinking_level).endswith("MINIMAL")
+
+    zero_budget_client = VertexGeminiClient(
+        model="gemini-2.5-flash",
+        thinking_budget=0,
+        genai_client=fake_genai,
+    )
+    zero_budget_client.generate_structured("sys", "usr", StrategyState)
+    assert captured["config"].thinking_config is not None
+    assert captured["config"].thinking_config.thinking_budget == 0
+
+    with pytest.raises(ValueError, match="thinking"):
+        VertexGeminiClient(
+            thinking_level="LOW",
+            thinking_budget=0,
+            genai_client=fake_genai,
+        )
+
 
 def test_vertex_gemini_client_validation_and_empty_response():
     fake_genai = SimpleNamespace(

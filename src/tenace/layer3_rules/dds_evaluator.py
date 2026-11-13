@@ -202,6 +202,60 @@ class RuleDDSEvaluator:
 
         worlds = self.sample_consistent_worlds(state, observer, strategy)
         world_seeds = [self._rng.getrandbits(64) for _ in worlds]
+        obs_idx = int(observer)
+
+        if worlds and all(cand.action >= BIDDING_ACTION_BASE for cand in candidates):
+            contract_by_action: dict[int, int] = {}
+            terminal_by_action: dict[int, float] = {}
+            probe_world = worlds[0]
+            for cand in candidates:
+                sim = probe_world.clone()
+                sim.apply_action(cand.action)
+                while not sim.is_terminal() and sim.current_phase() == 1:
+                    sim.apply_action(PASS_ACTION)
+                if sim.is_terminal():
+                    terminal_by_action[cand.action] = float(sim.returns()[obs_idx])
+                else:
+                    possible = sim.possible_contracts()
+                    active = [idx for idx, ok in enumerate(possible) if ok]
+                    contract_by_action[cand.action] = (
+                        active[0] if active else sim.contract_index()
+                    )
+
+            unique_contracts = sorted(set(contract_by_action.values()))
+            per_world_scores: list[dict[int, float]] = (
+                [
+                    dict(
+                        zip(
+                            unique_contracts,
+                            world.score_for_contracts(obs_idx, unique_contracts),
+                            strict=True,
+                        )
+                    )
+                    for world in worlds
+                ]
+                if unique_contracts
+                else [{} for _ in worlds]
+            )
+
+            scored_auction: list[CandidateOption] = []
+            for cand in candidates:
+                if cand.action in terminal_by_action:
+                    term_val = terminal_by_action[cand.action]
+                    payoffs = [term_val for _ in worlds]
+                else:
+                    c_idx = contract_by_action[cand.action]
+                    payoffs = [ float(ws[c_idx]) for ws in per_world_scores ]
+                ev = float(np.mean(payoffs))
+                make_prob = float(
+                    np.mean(
+                        [1.0 if p > 0.0 else (0.5 if p == 0.0 else 0.0) for p in payoffs]
+                    )
+                )
+                scored_auction.append(
+                    cand.model_copy(update={"baseline_ev": ev, "make_prob": make_prob})
+                )
+            return scored_auction
 
         scored: list[CandidateOption] = []
         for cand in candidates:

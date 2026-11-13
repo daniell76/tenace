@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+import logging
 import os
 from pathlib import Path
 import random
@@ -27,6 +28,8 @@ from pydantic import (
     model_validator,
 )
 import uvicorn
+
+logger = logging.getLogger(__name__)
 
 _UPSTREAM_MODEL_ERRORS: tuple[type[Exception], ...] = (
     ValueError,
@@ -1257,6 +1260,7 @@ def create_app(
         try:
             chosen_action = agent.step(state)
         except _UPSTREAM_MODEL_ERRORS as exc:
+            logger.warning("Upstream model evaluation error on /v1/step: %s", exc)
             raise HTTPException(
                 status_code=502,
                 detail=f"Upstream model evaluation error: {exc}",
@@ -1342,6 +1346,7 @@ def create_app(
                 num_boards=req.boards,
             )
         except _UPSTREAM_MODEL_ERRORS as exc:
+            logger.warning("Upstream model evaluation error on /v1/match: %s", exc)
             raise HTTPException(
                 status_code=502,
                 detail=f"Upstream model evaluation error: {exc}",

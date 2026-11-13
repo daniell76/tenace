@@ -804,6 +804,7 @@ def test_healthz_is_async_and_lazy_under_vertex_mode(
 
 def test_error_status_codes_separate_422_client_500_server_and_502_upstream(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     TModel = TypeVar("TModel", bound=BaseModel)
 
@@ -899,19 +900,29 @@ def test_error_status_codes_separate_422_client_500_server_and_502_upstream(
     )
     upstream_client = TestClient(upstream_app)
 
-    step_502 = upstream_client.post(
-        "/v1/step",
-        json={"seat": "NORTH", "board_number": 1, "tournament_seed": 42},
-    )
-    assert step_502.status_code == 502
-    assert "Upstream model evaluation error" in step_502.json()["detail"]
+    with caplog.at_level("WARNING", logger="tenace.server"):
+        step_502 = upstream_client.post(
+            "/v1/step",
+            json={"seat": "NORTH", "board_number": 1, "tournament_seed": 42},
+        )
+        assert step_502.status_code == 502
+        assert "Upstream model evaluation error" in step_502.json()["detail"]
 
-    match_502 = upstream_client.post(
-        "/v1/match",
-        json={"boards": 1, "dds_worlds": 1, "double_dummy": True},
+        match_502 = upstream_client.post(
+            "/v1/match",
+            json={"boards": 1, "dds_worlds": 1, "double_dummy": True},
+        )
+        assert match_502.status_code == 502
+        assert "Upstream model evaluation error" in match_502.json()["detail"]
+
+    assert any(
+        "Upstream model evaluation error on /v1/step" in rec.message
+        for rec in caplog.records
     )
-    assert match_502.status_code == 502
-    assert "Upstream model evaluation error" in match_502.json()["detail"]
+    assert any(
+        "Upstream model evaluation error on /v1/match" in rec.message
+        for rec in caplog.records
+    )
 
 
 def test_client_cache_reuses_clients_across_turns_and_bounds_lru_size(
