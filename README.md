@@ -73,7 +73,8 @@ Authenticate with Google Cloud Application Default Credentials (`gcloud auth app
 #        + Layer-2 Gemini Decisions API (gemini-decision-1, global, 0 output tokens!)
 uv run tenace-match --project your-gcp-project-id --boards 4
 
-# Gemini Decisions API via Gemini API key ($GEMINI_API_KEY / v1beta) + custom violation threshold:
+# Gemini Decisions API via AI Studio Auth Key fetched from Secret Manager (no hardcoded keys!):
+GEMINI_API_KEY="$(gcloud secrets versions access latest --secret=tenace-gemini-api-key --project=your-gcp-project-id)" \
 uv run tenace-match \
   --project your-gcp-project-id \
   --evaluator-backend decisions \

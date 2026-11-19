@@ -773,6 +773,7 @@ def test_dockerfile_and_dockerignore_conventions() -> None:
         "terraform",
         "tests",
         "docs",
+        "keys",
     } <= dockerignore_lines
 
 

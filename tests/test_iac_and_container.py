@@ -79,6 +79,7 @@ def test_gitignore_protects_local_tfvars_backends_state_and_plugins() -> None:
         "terraform/environments/dev/.terraform.lock.hcl",
         "crash.log",
         "crash.20261112.log",
+        "keys/ai-studio-apikey.txt",
     ]
     for rel_path in must_ignore:
         res = _run_git("check-ignore", "-q", rel_path, check=False)
@@ -115,7 +116,7 @@ def test_dockerfile_and_dockerignore_cloudrun_hygiene() -> None:
         for line in dockerignore_path.read_text(encoding="utf-8").splitlines()
         if line.strip() and not line.strip().startswith("#")
     }
-    for expected in (".git", "terraform", "tests", ".venv"):
+    for expected in (".git", "terraform", "tests", ".venv", "keys"):
         assert expected in dockerignore_lines, f"Missing {expected!r} in .dockerignore"
 
 
@@ -209,6 +210,8 @@ def test_terraform_directory_structure_and_docs() -> None:
         assert "gcloud run jobs execute" in doc_text
     assert "terraform/local/" in tf_readme
     assert "-backend-config=" in tf_readme
+    assert "gcloud secrets create" in tf_readme
+    assert "gcloud secrets versions add" in tf_readme
 
 
 def test_terraform_fmt_check() -> None:
@@ -291,11 +294,17 @@ def test_tracked_files_contain_no_sensitive_identifiers() -> None:
         assert not rel_path.startswith("terraform/local/"), (
             f"Local Terraform file must never be tracked by git: {rel_path}"
         )
+        assert not rel_path.startswith("keys/"), (
+            f"Local key file must never be tracked by git: {rel_path}"
+        )
 
     status_lines = _run_git("status", "--porcelain").stdout.splitlines()
     for line in status_lines:
         assert "terraform/local" not in line, (
             f"terraform/local/ must be completely ignored by git status, got: {line}"
+        )
+        assert "keys/" not in line, (
+            f"keys/ must be completely ignored by git status, got: {line}"
         )
 
     dynamic_forbidden_literals: set[str] = set()
@@ -328,6 +337,8 @@ def test_tracked_files_contain_no_sensitive_identifiers() -> None:
         (re.compile(r"\b[a-z][a-z0-9-]{3,23}-\d{6}\b"), "numbered GCP project ID"),
         (re.compile(r"\b[a-z0-9.-]+\.goog\b", re.IGNORECASE), "internal .goog domain"),
         (re.compile(r"/" + r"google/(?:data|src)/"), "internal /google/{data,src}/ path"),
+        (re.compile(r"\bAQ\.[A-Za-z0-9_-]{20,}\b"), "AI Studio auth key"),
+        (re.compile(r"\bAIza[0-9A-Za-z_-]{25,}\b"), "Google API key"),
     ]
 
     for rel_path in tracked_files:

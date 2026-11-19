@@ -163,10 +163,27 @@ gcloud run jobs execute tenace-bench-dev \
 
 ## Optional Secret Manager Wiring (`decisions_auth = "api-key"`)
 
-By default, Tenace authenticates to Vertex AI (`gemini-4-argon` and `gemini-decision-1`) via the dedicated Cloud Run runtime Service Account (`roles/aiplatform.user`) with zero API keys. If you instead set `decisions_auth = "api-key"`, store the key in Secret Manager and pass `gemini_api_key_secret_id` (never place plaintext API keys in `.tfvars`):
+By default, Tenace authenticates to Vertex AI (`gemini-4-argon` and `gemini-decision-1`) via the dedicated Cloud Run runtime Service Account (`roles/aiplatform.user`) with zero API keys. To authenticate `gemini-decision-1` using an AI Studio auth key without ever hardcoding keys in scripts or `.tfvars`, store the key in Secret Manager and pass `gemini_api_key_secret_id`:
+
+```bash
+# 1. Create the secret once (automatic replication)
+gcloud secrets create tenace-gemini-api-key \
+  --project your-gcp-project-id \
+  --replication-policy automatic
+
+# 2. Upload the key payload from a gitignored local file (strip trailing newlines)
+tr -d '\r\n' < keys/ai-studio-apikey.txt \
+  | gcloud secrets versions add tenace-gemini-api-key \
+      --project your-gcp-project-id \
+      --data-file=-
+```
+
+Then configure your gitignored `terraform/local/<env>/terraform.tfvars` (Terraform grants `roles/secretmanager.secretAccessor` to the Cloud Run runtime service account and injects `GEMINI_API_KEY` at runtime):
 
 ```hcl
 evaluator_backend        = "decisions"
+evaluator_model          = "gemini-decision-1"
+evaluator_location       = "global"
 decisions_auth           = "api-key"
 gemini_api_key_secret_id = "tenace-gemini-api-key"
 ```
