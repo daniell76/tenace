@@ -72,6 +72,14 @@ run "default_decisions_service_and_job" {
   }
 
   assert {
+    condition = (
+      google_cloud_run_v2_service.api.template[0].containers[0].startup_probe[0].failure_threshold *
+      google_cloud_run_v2_service.api.template[0].containers[0].startup_probe[0].period_seconds
+    ) >= 60
+    error_message = "Expected Cloud Run Service startup_probe window >= 60s for cold OpenSpiel/GenAI imports."
+  }
+
+  assert {
     condition     = google_cloud_run_v2_service.api.template[0].containers[0].liveness_probe[0].http_get[0].path == "/health"
     error_message = "Expected Cloud Run Service liveness_probe path to be GFE-safe '/health'."
   }

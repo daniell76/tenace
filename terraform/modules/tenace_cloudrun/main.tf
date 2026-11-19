@@ -125,7 +125,7 @@ resource "google_cloud_run_v2_service" "api" {
         initial_delay_seconds = 2
         period_seconds        = 5
         timeout_seconds       = 3
-        failure_threshold     = 6
+        failure_threshold     = 18
         http_get {
           path = "/health"
           port = 8080
