@@ -452,3 +452,80 @@ def test_auction_score_candidates_batches_dds_per_world_and_matches_exact_scores
             if s_cand.label in expected_evs:
                 assert s_cand.baseline_ev == pytest.approx(expected_evs[s_cand.label], abs=1e-9)
                 assert s_cand.make_prob == pytest.approx(expected_mps[s_cand.label], abs=1e-9)
+
+
+def test_select_guarded_action_auction_phase_respects_sayc_and_avoids_dds_traps():
+    evaluator = RuleDDSEvaluator(max_make_prob_drop=0.20)
+
+    # 1. Opening Pass (11 HCP, 0 Aces): Pass (mp=0.50) MUST NOT be pruned against 1C (mp=0.875)
+    pass_opt = CandidateOption(action=PASS_ACTION, label="Pass", baseline_ev=0.0, make_prob=0.50)
+    open_1c = CandidateOption(action=55, label="1C", baseline_ev=66.2, make_prob=0.875)
+    chosen_open = evaluator.select_guarded_action(
+        [pass_opt, open_1c],
+        TacticalDecision(option_scores={"Pass": 0.80, "1C": 0.65}),
+        phase="auction",
+    )
+    assert chosen_open == PASS_ACTION
+
+    # 2. Undoubled slam trap (6C ev=-35.0 > 5C/Pass ev=-53.8): MUST stop in Pass (5C)
+    pass_5c = CandidateOption(action=PASS_ACTION, label="Pass", baseline_ev=-53.8, make_prob=0.125)
+    slam_6c = CandidateOption(action=80, label="6C", baseline_ev=-35.0, make_prob=0.125)
+    assert (
+        evaluator.select_guarded_action(
+            [pass_5c, slam_6c],
+            TacticalDecision(option_scores={"Pass": 0.82, "6C": 0.15}),
+            phase="auction",
+        )
+        == PASS_ACTION
+    )
+
+    # 3. Reckless Dbl escalation trap (+800 naive EV vs Pass +194): MUST prefer Pass when L2 does
+    dbl_opt = CandidateOption(action=53, label="Dbl", baseline_ev=800.0, make_prob=1.0)
+    pass_def = CandidateOption(action=PASS_ACTION, label="Pass", baseline_ev=193.8, make_prob=1.0)
+    assert (
+        evaluator.select_guarded_action(
+            [pass_def, dbl_opt],
+            TacticalDecision(option_scores={"Pass": 0.78, "Dbl": 0.45}),
+            phase="auction",
+        )
+        == PASS_ACTION
+    )
+
+    # 4. Conventional artificial bid (e.g. 2C Stayman over 1NT): MUST NOT be pruned for low raw make_prob
+    stayman_2c = CandidateOption(action=60, label="2C", baseline_ev=-120.0, make_prob=0.10)
+    pass_1nt = CandidateOption(action=PASS_ACTION, label="Pass", baseline_ev=120.0, make_prob=0.85)
+    assert (
+        evaluator.select_guarded_action(
+            [pass_1nt, stayman_2c],
+            TacticalDecision(option_scores={"2C": 0.91, "Pass": 0.35}),
+            phase="auction",
+        )
+        == 60
+    )
+
+    # 5. Unmentioned candidates default to 0.0 (not 0.5), so an omitted reckless 7NT cannot beat scored Pass
+    grand_7nt = CandidateOption(action=89, label="7NT", baseline_ev=500.0, make_prob=0.90)
+    assert (
+        evaluator.select_guarded_action(
+            [pass_5c, grand_7nt],
+            TacticalDecision(option_scores={"Pass": 0.30}),
+            phase="auction",
+        )
+        == PASS_ACTION
+    )
+
+    # 6. Exact tie on option_scores breaks cleanly via baseline_ev
+    assert (
+        evaluator.select_guarded_action(
+            [
+                CandidateOption(action=55, label="1C", baseline_ev=50.0, make_prob=0.6),
+                CandidateOption(action=56, label="1D", baseline_ev=90.0, make_prob=0.6),
+            ],
+            TacticalDecision(option_scores={"1C": 0.75, "1D": 0.75}),
+            phase="auction",
+        )
+        == 56
+    )
+
+    # 7. Missing/empty decision falls back to DDS EV safely
+    assert evaluator.select_guarded_action([pass_opt, open_1c], None, phase="auction") == 55

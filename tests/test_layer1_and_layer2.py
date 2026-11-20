@@ -586,6 +586,7 @@ def test_layer2_evaluator_marks_acting_hand_dummy_when_declarer_plays_dummy_card
     evaluator.evaluate(auction_facts, auction_strategy, bid_candidates)
     auction_prompt = client.calls[1]["user_prompt"]
     assert "Acting Hand:" not in auction_prompt
+    assert "SAYC" in auction_prompt
 
 
 def test_layer2_evaluator_rejects_empty_candidates_and_terminal_phase():

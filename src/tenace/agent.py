@@ -36,7 +36,10 @@ class TenaceAgent:
             client=strategist_client,
             convention_card=convention_card,
         )
-        self.evaluator = TacticalOptionEvaluator(client=evaluator_client)
+        self.evaluator = TacticalOptionEvaluator(
+            client=evaluator_client,
+            convention_card=convention_card,
+        )
         self.dds_evaluator = (
             dds_evaluator if dds_evaluator is not None else RuleDDSEvaluator()
         )
@@ -178,5 +181,10 @@ class TenaceAgent:
             )
             self.evaluator_calls += 1
 
-        # Layer 3 Anti-Blunder Gate
-        return self.dds_evaluator.select_guarded_action(scored_candidates, decision)
+        # Layer 3 Guarded Selection (strict make_prob blunder gate applies during card play;
+        # auction selection trusts Layer-2 partnership bidding scores without pass-out DDS bias)
+        return self.dds_evaluator.select_guarded_action(
+            scored_candidates,
+            decision,
+            phase=facts.phase,
+        )

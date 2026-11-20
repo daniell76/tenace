@@ -12,7 +12,7 @@ from google.cloud import aiplatform
 from google.genai import types as genai_types
 from pydantic import BaseModel, Field, ValidationError
 
-from tenace.domain.types import CandidateOption, TacticalDecision
+from tenace.domain.types import BIDDING_ACTION_BASE, CandidateOption, TacticalDecision
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -35,6 +35,14 @@ _DECISION_SCORE_CRITERIA: tuple[str, ...] = (
     "2 - Reasonable neutral alternative with acceptable expected value.",
     "3 - Strong tactical choice aligned with both DDS expected value and strategic plan.",
     "4 - Optimal tactical play or bid maximizing strategic execution and contract safety.",
+)
+
+_AUCTION_SCORE_CRITERIA: tuple[str, ...] = (
+    "0 - Reckless/terrible call (massive overbid, slam without values/aces, or undisciplined double).",
+    "1 - Poor call violating bidding-system strength or shape range, or misleading partner.",
+    "2 - Marginal or borderline alternative call.",
+    "3 - Good standard call consistent with hand strength, partnership system, and auction.",
+    "4 - Optimal textbook call under the partnership bidding system and live auction.",
 )
 
 __all__ = [
@@ -417,20 +425,34 @@ class GeminiDecisionsClient:
                 )
             seen_labels.add(cand.label)
 
+        is_auction_eval = (
+            "| Phase: auction" in context_text
+            and all(cand.action >= BIDDING_ACTION_BASE for cand in candidates)
+        )
         questions: dict[str, dict[str, Any]] = {}
         for idx, cand in enumerate(candidates):
-            make_prob_str = (
-                f"{cand.make_prob:.2f}" if cand.make_prob is not None else "N/A"
-            )
-            questions[f"cand_{idx}"] = {
-                "type": "score",
-                "instructions": (
-                    f"Rate tactical quality of candidate action '{cand.label}' "
-                    f"(DDS baseline_ev={cand.baseline_ev:.1f}, make_prob={make_prob_str}) "
-                    "for achieving the Active Strategy while avoiding blunders."
-                ),
-                "criteria": list(_DECISION_SCORE_CRITERIA),
-            }
+            if is_auction_eval:
+                questions[f"cand_{idx}"] = {
+                    "type": "score",
+                    "instructions": (
+                        f"How good is the bridge auction call '{cand.label}' under the "
+                        "partnership's bidding system for the current hand and live auction?"
+                    ),
+                    "criteria": list(_AUCTION_SCORE_CRITERIA),
+                }
+            else:
+                make_prob_str = (
+                    f"{cand.make_prob:.2f}" if cand.make_prob is not None else "N/A"
+                )
+                questions[f"cand_{idx}"] = {
+                    "type": "score",
+                    "instructions": (
+                        f"Rate tactical quality of candidate action '{cand.label}' "
+                        f"(DDS baseline_ev={cand.baseline_ev:.1f}, make_prob={make_prob_str}) "
+                        "for achieving the Active Strategy while avoiding blunders."
+                    ),
+                    "criteria": list(_DECISION_SCORE_CRITERIA),
+                }
 
         if has_assumptions:
             questions["assumption_violated"] = {

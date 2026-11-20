@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import random
+from typing import Literal
 
 import numpy as np
 import pyspiel
@@ -281,11 +282,32 @@ class RuleDDSEvaluator:
         self,
         candidates: list[CandidateOption],
         decision: TacticalDecision | None = None,
+        *,
+        phase: Literal["play", "auction"] = "play",
     ) -> int:
         if not candidates:
             raise ValueError("No legal candidates available")
         if len(candidates) == 1:
             return candidates[0].action
+
+        def _safe_ev(cand: CandidateOption) -> float:
+            return float(cand.baseline_ev) if math.isfinite(cand.baseline_ev) else float("-inf")
+
+        # Auction calls are partnership communication bids (including Pass, artificial
+        # conventions like Stayman/transfers/Blackwood, and doubles) — NOT final contracts
+        # scored via naive [call, Pass, Pass, Pass] double-dummy rollouts. Never prune
+        # Pass or conventional calls via the card-play make_prob gate, and do not mix
+        # undoubled slam/double EV distortions against Layer-2's bidding scores.
+        if phase == "auction" and decision is not None and decision.option_scores:
+            def _auction_score(cand: CandidateOption) -> tuple[float, float]:
+                raw = decision.option_scores.get(cand.label)
+                if raw is None or not math.isfinite(raw):
+                    llm_score = 0.0
+                else:
+                    llm_score = min(1.0, max(0.0, float(raw)))
+                return (llm_score, _safe_ev(cand))
+
+            return max(candidates, key=_auction_score).action
 
         probs = [
             c.make_prob
@@ -304,9 +326,6 @@ class RuleDDSEvaluator:
             ]
         else:
             viable = list(candidates)
-
-        def _safe_ev(cand: CandidateOption) -> float:
-            return float(cand.baseline_ev) if math.isfinite(cand.baseline_ev) else float("-inf")
 
         if decision is None or not decision.option_scores:
             return max(viable, key=_safe_ev).action

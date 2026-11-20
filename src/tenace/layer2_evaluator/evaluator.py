@@ -7,6 +7,8 @@ from tenace.domain.types import (
     action_label,
 )
 from tenace.layer1_strategist import (
+    SAYC_CONVENTION_CARD,
+    ConventionCard,
     format_auction_sequence,
     format_cards_by_suit,
     format_contract_summary,
@@ -19,8 +21,13 @@ __all__ = ["DiffusionOptionEvaluator", "TacticalOptionEvaluator"]
 
 
 class TacticalOptionEvaluator:
-    def __init__(self, client: StructuredModelClient) -> None:
+    def __init__(
+        self,
+        client: StructuredModelClient,
+        convention_card: ConventionCard = SAYC_CONVENTION_CARD,
+    ) -> None:
         self.client = client
+        self.convention_card = convention_card
 
     def evaluate(
         self,
@@ -33,15 +40,31 @@ class TacticalOptionEvaluator:
         if not candidates:
             raise ValueError("candidates must be non-empty")
 
-        system_prompt = (
-            "You are Tenace Layer 2 Tactical Option Evaluator.\n"
-            "Score each legal candidate action in [0.0, 1.0] under `option_scores` keyed by "
-            "the exact candidate label, balancing Layer 1 strategic goals with Layer 3 "
-            "double-dummy baseline EV and make probability.\n"
-            "Set `assumption_violated` to true ONLY if board facts contradict a critical "
-            "Layer 1 strategic assumption. Keep `rationale` to one brief sentence and leave "
-            "`violation_reason` empty unless `assumption_violated` is true."
-        )
+        if facts.phase == "auction":
+            system_prompt = (
+                "You are Tenace Layer 2 Tactical Option Evaluator (Bridge Auction).\n"
+                "Score each legal auction call in [0.0, 1.0] under `option_scores` keyed by "
+                "the exact candidate label following the partnership convention system.\n"
+                "Discipline rules: Pass without opening strength (12+ HCP / Rule of 20, or "
+                "Rule of 15 in 4th seat); avoid reckless low-level doubles or escaping doubled "
+                "contracts into hopeless higher bids; NEVER bid slams (6/7-level) without ~33+ "
+                "combined HCP and Ace/keycard control. NOTE: candidate baseline_ev values "
+                "naively assume all opponents immediately pass without doubling — prioritize "
+                "sound partnership bidding over pass-out double-dummy EV.\n"
+                "Set `assumption_violated` to true ONLY if observed calls directly contradict "
+                "a critical Layer 1 assumption. Keep `rationale` to one brief sentence and "
+                "leave `violation_reason` empty unless `assumption_violated` is true."
+            )
+        else:
+            system_prompt = (
+                "You are Tenace Layer 2 Tactical Option Evaluator.\n"
+                "Score each legal candidate action in [0.0, 1.0] under `option_scores` keyed by "
+                "the exact candidate label, balancing Layer 1 strategic goals with Layer 3 "
+                "double-dummy baseline EV and make probability.\n"
+                "Set `assumption_violated` to true ONLY if board facts contradict a critical "
+                "Layer 1 strategic assumption. Keep `rationale` to one brief sentence and leave "
+                "`violation_reason` empty unless `assumption_violated` is true."
+            )
 
         dummy_summary = (
             f"{facts.dummy_seat.name} ({format_cards_by_suit(facts.dummy_cards)})"
@@ -94,26 +117,57 @@ class TacticalOptionEvaluator:
                 f"Played Cards: {played_summary}",
                 f"Known Voids: {format_known_voids(facts.known_voids)}",
                 "",
+            ]
+        )
+        if facts.phase == "auction":
+            user_lines.extend(
+                [
+                    "=== Partnership Bidding System ===",
+                    f"System: {self.convention_card.name}",
+                    f"Rules: {self.convention_card.summary_rules}",
+                    "Discipline: Pass without opening strength (12+ HCP / Rule of 20, or Rule of 15 in 4th seat). "
+                    "Do NOT double marginal contracts lightly, run out of doubled contracts to hopeless higher levels, "
+                    "or bid slams (6/7-level) without ~33+ combined HCP and Ace/keycard control.",
+                    "",
+                ]
+            )
+        user_lines.extend(
+            [
                 "=== Active Strategy ===",
                 f"Revision: {strategy.revision}",
                 f"Plan Summary: {strategy.plan_summary}",
                 f"Target/Threat: {strategy.target_or_threat or '(none)'}",
                 f"Assumptions: {assumptions_summary}",
                 "",
-                "=== Candidate Options ===",
-                *candidate_lines,
             ]
         )
-        user_prompt = "\n".join(user_lines)
+        if facts.phase == "auction":
+            user_lines.append(
+                "Note: Treat the LIVE Auction sequence above as authoritative over any earlier-round strategy summary."
+            )
 
         direct_eval = getattr(self.client, "evaluate_options", None)
         if callable(direct_eval):
+            if facts.phase == "auction":
+                direct_lines = [
+                    *user_lines,
+                    "=== Legal Auction Calls ===",
+                    ", ".join(c.label for c in candidates),
+                ]
+                context_text = "\n".join(direct_lines)
+            else:
+                context_text = "\n".join(
+                    [*user_lines, "=== Candidate Options ===", *candidate_lines]
+                )
             return direct_eval(
-                context_text=user_prompt,
+                context_text=context_text,
                 candidates=candidates,
                 has_assumptions=bool(strategy.assumptions),
             )
 
+        user_prompt = "\n".join(
+            [*user_lines, "=== Candidate Options ===", *candidate_lines]
+        )
         return self.client.generate_structured(
             system_prompt=system_prompt,
             user_prompt=user_prompt,

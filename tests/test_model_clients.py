@@ -599,6 +599,49 @@ def test_gemini_decisions_client_evaluates_options_with_real_sdk_types_and_norma
     assert res_no_assumptions.violation_reason == ""
     assert res_no_assumptions.option_scores == pytest.approx({"S:A": 0.90, "1NT": 1.0})
 
+    # Case 3: Pure auction evaluation omits naive pass-out baseline_ev from question text
+    # so undoubled slam/double EV distortions never bait gemini-decision-1 into overbidding.
+    auction_calls: list[dict[str, Any]] = []
+
+    def fake_auction_create(*, model: str, input: Any, questions: dict[str, Any]) -> Any:
+        genai_decisions.CreateDecisionRequest.model_validate(
+            {"model": model, "input": input, "questions": questions}
+        )
+        auction_calls.append({"model": model, "input": input, "questions": questions})
+        return genai_decisions.CreateDecisionResponse(
+            answers={
+                "cand_0": genai_decisions.ScoreAnswer(
+                    score=3.4,
+                    confidence=0.8,
+                    legend={"0": "bad", "4": "best"},
+                    probabilities={"0": 0.0, "1": 0.0, "2": 0.1, "3": 0.4, "4": 0.5},
+                ),
+                "cand_1": genai_decisions.ScoreAnswer(
+                    score=0.4,
+                    confidence=0.9,
+                    legend={"0": "bad", "4": "best"},
+                    probabilities={"0": 0.7, "1": 0.2, "2": 0.1, "3": 0.0, "4": 0.0},
+                ),
+            }
+        )
+
+    auction_client = GeminiDecisionsClient(
+        genai_client=SimpleNamespace(decisions=SimpleNamespace(create=fake_auction_create))
+    )
+    auction_res = auction_client.evaluate_options(
+        context_text="=== Board Facts ===\nObserver: NORTH | Phase: auction\nAuction: NORTH:1C",
+        candidates=[
+            CandidateOption(action=52, label="Pass", baseline_ev=-53.8, make_prob=0.125),
+            CandidateOption(action=80, label="6C", baseline_ev=-35.0, make_prob=0.125),
+        ],
+        has_assumptions=False,
+    )
+    assert auction_res.option_scores["Pass"] > auction_res.option_scores["6C"]
+    q_6c = auction_calls[0]["questions"]["cand_1"]["instructions"]
+    assert "6C" in q_6c
+    assert "baseline_ev=" not in q_6c
+    assert "make_prob=" not in q_6c
+
 
 def test_gemini_decisions_client_triggers_violation_interrupt_and_accepts_dict_answers():
     def fake_create(*, model: str, input: Any, questions: dict[str, Any]) -> Any:
