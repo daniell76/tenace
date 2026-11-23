@@ -205,6 +205,8 @@ def test_convention_card_immutability_and_zero_partner_state_leakage():
     assert "1nt overcall" in rules_lower
     assert "penalty doubles at 4/5-level" in rules_lower
     assert "up the line" in rules_lower
+    assert "rule of 20" in rules_lower
+    assert "quick tricks" in rules_lower
     assert "attitude" in rules_lower and "count" in rules_lower
 
     # Empty or whitespace strings must be rejected
@@ -550,6 +552,7 @@ def test_layer2_auction_prompt_distinguishes_partner_active_vs_unopened():
         ],
     )
     assert "12+ HCP" in client.calls[0]["user_prompt"]
+    assert "do not pass" in client.calls[0]["user_prompt"].lower()
 
     # 2. Partner (WEST) opened 1H -> MUST surface forcing/response guidance instead of "Pass without 12+ HCP"
     partner_opened = _make_facts(

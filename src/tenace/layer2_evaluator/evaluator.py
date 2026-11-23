@@ -158,9 +158,11 @@ class TacticalOptionEvaluator:
                 )
             else:
                 discipline_line = (
-                    "Discipline: Unopened auction — Pass without opening strength (12+ HCP / Rule of 20, "
-                    "or Rule of 15 in 4th seat), unless holding a textbook weak two (6-card suit, 5-11 HCP) "
-                    "or 3-level preempt (7+ card suit). Avoid speculative slams or off-shape bids."
+                    "Discipline: Unopened auction — Open sound 12+ HCP / Rule of 20 hands "
+                    "(2+ quick tricks) in 1st/2nd seat; do NOT pass a 12+ HCP unbalanced hand "
+                    "just for a singleton honor or weak 5-card major. Pass below opening strength "
+                    "(or Rule of 15 in 4th seat), unless holding a textbook weak two (6-card suit, "
+                    "5-11 HCP) or 3-level preempt (7+ card suit). Avoid speculative slams or off-shape bids."
                 )
             user_lines.extend(
                 [
