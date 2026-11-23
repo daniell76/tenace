@@ -1215,3 +1215,37 @@ def test_tenace_agent_skips_redundant_auction_replan_on_flat_bust_hand():
     # Back to N (flat 0 HCP, partner passed): MUST NOT burn a 2nd Strategist call!
     assert agent.step(state.clone()) == PASS_ACTION
     assert agent.strategist_calls == 1
+
+
+def test_extract_recommended_auction_action_parses_single_leading_directive():
+    from tenace.agent import extract_recommended_auction_action
+    from tenace.domain.types import CandidateOption, DBL_ACTION, RDBL_ACTION
+
+    cands = [
+        CandidateOption(action=PASS_ACTION, label="Pass"),
+        CandidateOption(action=DBL_ACTION, label="Dbl"),
+        CandidateOption(action=RDBL_ACTION, label="RDbl"),
+        CandidateOption(action=FIRST_CONTRACT_BID_ACTION + 6, label="2D"),
+        CandidateOption(action=FIRST_CONTRACT_BID_ACTION + 7, label="2H"),
+        CandidateOption(action=FIRST_CONTRACT_BID_ACTION + 19, label="4NT"),
+        CandidateOption(action=FIRST_CONTRACT_BID_ACTION + 28, label="6S"),
+    ]
+    assert extract_recommended_auction_action(
+        "Bid 2H (Jacoby Transfer to Spades) over partner's 1NT opening.", cands
+    ) == FIRST_CONTRACT_BID_ACTION + 7
+    assert extract_recommended_auction_action(
+        "Bid 6S. East's 5S bid over 4NT shows 3 Aces.", cands
+    ) == FIRST_CONTRACT_BID_ACTION + 28
+    assert extract_recommended_auction_action(
+        "Double 4H for penalty.", cands
+    ) == DBL_ACTION
+    assert extract_recommended_auction_action(
+        "Bid XX (Redouble) to show 10+ HCP.", cands
+    ) == RDBL_ACTION
+    assert extract_recommended_auction_action(
+        "Pass with 9 HCP.", cands
+    ) == PASS_ACTION
+    # Ambiguous disjunction -> returns None so Layer 2 decides freely
+    assert extract_recommended_auction_action(
+        "Bid 2D or 2H depending on agreement.", cands
+    ) is None

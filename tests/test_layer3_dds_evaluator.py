@@ -658,3 +658,33 @@ def test_play_ev_blunder_gate_blocks_extra_undertricks_when_make_prob_tied():
         evaluator.select_guarded_action([c_hi, c_lo], prefer_lo, phase="play")
         == c_lo.action
     )
+
+
+def test_select_guarded_action_breaks_near_tied_auction_calls_with_l1_preferred_action():
+    evaluator = RuleDDSEvaluator(max_make_prob_drop=0.20)
+    tr_hearts_2d = CandidateOption(action=61, label="2D", baseline_ev=85.0, make_prob=0.6)
+    tr_spades_2h = CandidateOption(action=62, label="2H", baseline_ev=-40.0, make_prob=0.3)
+
+    # Tied / near-tied L2 scores: prefer L1's explicit 2H transfer over distorted pass-out EV (2D)
+    near_tied = TacticalDecision(option_scores={"2D": 0.78, "2H": 0.74})
+    assert (
+        evaluator.select_guarded_action(
+            [tr_hearts_2d, tr_spades_2h],
+            near_tied,
+            phase="auction",
+            preferred_action=62,
+        )
+        == 62
+    )
+
+    # Strong L2 disagreement (> 0.08 gap): L2 retains full veto power
+    strong_veto = TacticalDecision(option_scores={"2D": 0.90, "2H": 0.50})
+    assert (
+        evaluator.select_guarded_action(
+            [tr_hearts_2d, tr_spades_2h],
+            strong_veto,
+            phase="auction",
+            preferred_action=62,
+        )
+        == 61
+    )

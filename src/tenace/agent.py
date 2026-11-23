@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import re
+
 import pyspiel
 
-from tenace.domain.types import PASS_ACTION, Seat, StrategyState, Suit, card_suit
+from tenace.domain.types import (
+    PASS_ACTION,
+    CandidateOption,
+    Seat,
+    StrategyState,
+    Suit,
+    card_suit,
+)
 from tenace.layer1_strategist import (
     SAYC_CONVENTION_CARD,
     ConventionCard,
@@ -16,7 +25,57 @@ from tenace.layer3_rules import (
 )
 from tenace.models.clients import StructuredModelClient
 
-__all__ = ["TenaceAgent"]
+__all__ = ["TenaceAgent", "extract_recommended_auction_action"]
+
+_CONTRACT_BID_CMD_RE = re.compile(
+    r"^(?:bid|open|respond(?:\s+with)?|rebid|overcall|raise(?:\s+to)?|jump(?:\s+to)?|"
+    r"cuebid|invite(?:\s+with)?|accept(?:\s+to)?|sign\s+off(?:\s+in)?|"
+    r"complete(?:\s+the\s+transfer\s+to)?)\s+([1-7](?:NT|[CDHS]))\b",
+    flags=re.IGNORECASE,
+)
+_LEADING_RDBL_RE = re.compile(r"^(?:bid\s+)?(?:XX|redouble|rdbl)\b", flags=re.IGNORECASE)
+_LEADING_DBL_RE = re.compile(r"^(?:bid\s+)?(?:X|double|dbl)\b", flags=re.IGNORECASE)
+_LEADING_PASS_RE = re.compile(r"^pass\b", flags=re.IGNORECASE)
+_OR_ALT_BID_RE = re.compile(
+    r"^\s*(?:or|/)\s*(?:consider\s+|bid\s+|raise\s+to\s+|jump\s+to\s+)?"
+    r"(?:[1-7](?:NT|[CDHS])|pass|double|dbl|redouble|rdbl|xx|x)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def extract_recommended_auction_action(
+    plan_summary: str,
+    candidates: list[CandidateOption],
+) -> int | None:
+    """Parse an unambiguous leading auction call directive from a live L1 plan_summary."""
+    text = plan_summary.strip()
+    if not text or not candidates:
+        return None
+    by_label = {c.label.upper(): c.action for c in candidates}
+
+    # Check leading clause only; reject explicit "X or Y" hedging right after the call.
+    label_key: str | None = None
+    match_end = 0
+    m_bid = _CONTRACT_BID_CMD_RE.match(text)
+    if m_bid is not None:
+        label_key = m_bid.group(1).upper()
+        match_end = m_bid.end()
+    elif (m_rdbl := _LEADING_RDBL_RE.match(text)) is not None:
+        label_key = "RDBL"
+        match_end = m_rdbl.end()
+    elif (m_dbl := _LEADING_DBL_RE.match(text)) is not None:
+        label_key = "DBL"
+        match_end = m_dbl.end()
+    elif (m_pass := _LEADING_PASS_RE.match(text)) is not None:
+        label_key = "PASS"
+        match_end = m_pass.end()
+    else:
+        return None
+
+    tail = text[match_end:]
+    if _OR_ALT_BID_RE.match(tail) is not None:
+        return None
+    return by_label.get(label_key)
 
 
 class TenaceAgent:
@@ -157,6 +216,7 @@ class TenaceAgent:
                 and not self._dummy_seen
             )
         )
+        strategy_updated_this_turn = False
         has_budget = facts.phase != "play" or self._play_strategist_calls < self.max_play_replans
         if needs_mandatory_plan or (meaningful_surprises and has_budget):
             trigger_reasons: list[str] = []
@@ -186,6 +246,7 @@ class TenaceAgent:
             )
             self.strategy_history.append(self.strategy)
             self.strategist_calls += 1
+            strategy_updated_this_turn = True
             if facts.phase == "play":
                 self._play_strategist_calls += 1
             if facts.dummy_seat is not None:
@@ -227,6 +288,7 @@ class TenaceAgent:
             )
             self.strategy_history.append(self.strategy)
             self.strategist_calls += 1
+            strategy_updated_this_turn = True
             if facts.phase == "play":
                 self._play_strategist_calls += 1
             if facts.dummy_seat is not None:
@@ -246,9 +308,16 @@ class TenaceAgent:
             self.evaluator_calls += 1
 
         # Layer 3 Guarded Selection (strict make_prob blunder gate applies during card play;
-        # auction selection trusts Layer-2 partnership bidding scores without pass-out DDS bias)
+        # auction selection trusts Layer-2 partnership bidding scores without pass-out DDS bias,
+        # breaking near-ties with a freshly planned Layer-1 recommendation when unambiguous)
+        preferred_action = (
+            extract_recommended_auction_action(self.strategy.plan_summary, scored_candidates)
+            if facts.phase == "auction" and strategy_updated_this_turn
+            else None
+        )
         return self.dds_evaluator.select_guarded_action(
             scored_candidates,
             decision,
             phase=facts.phase,
+            preferred_action=preferred_action,
         )

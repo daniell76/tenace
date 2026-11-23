@@ -595,6 +595,8 @@ class RuleDDSEvaluator:
         decision: TacticalDecision | None = None,
         *,
         phase: Literal["play", "auction"] = "play",
+        preferred_action: int | None = None,
+        auction_tie_margin: float = 0.08,
     ) -> int:
         if not candidates:
             raise ValueError("No legal candidates available")
@@ -610,15 +612,24 @@ class RuleDDSEvaluator:
         # Pass or conventional calls via the card-play make_prob gate, and do not mix
         # undoubled slam/double EV distortions against Layer-2's bidding scores.
         if phase == "auction" and decision is not None and decision.option_scores:
-            def _auction_score(cand: CandidateOption) -> tuple[float, float]:
+            def _norm_score(cand: CandidateOption) -> float:
                 raw = decision.option_scores.get(cand.label)
                 if raw is None or not math.isfinite(raw):
-                    llm_score = 0.0
-                else:
-                    llm_score = min(1.0, max(0.0, float(raw)))
-                return (llm_score, _safe_ev(cand))
+                    return 0.0
+                return min(1.0, max(0.0, float(raw)))
 
-            return max(candidates, key=_auction_score).action
+            if preferred_action is not None and auction_tie_margin >= 0.0:
+                best_score = max(_norm_score(c) for c in candidates)
+                pref = next((c for c in candidates if c.action == preferred_action), None)
+                if (
+                    pref is not None
+                    and pref.label in decision.option_scores
+                    and math.isfinite(decision.option_scores[pref.label])
+                    and _norm_score(pref) >= best_score - auction_tie_margin - 1e-12
+                ):
+                    return pref.action
+
+            return max(candidates, key=lambda c: (_norm_score(c), _safe_ev(c))).action
 
         probs = [
             c.make_prob
