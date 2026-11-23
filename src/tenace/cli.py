@@ -496,8 +496,10 @@ def build_arg_parser(env: Mapping[str, str] | None = None) -> argparse.ArgumentP
         "--bluechip-cmd",
         default=None,
         help=(
-            "Command template with '{port}' placeholder for --opponent bluechip, e.g. "
-            "'wine /path/to/Wbridge5.exe Autoconnect {port}'."
+            "Command template with '{port}' (and optional '{seat}') placeholder for "
+            "--opponent bluechip, e.g. 'wine /path/to/Wbridge5.exe Autoconnect {port}' "
+            "or 'env -C /path/to/ben/src python table_manager_client.py --host 127.0.0.1 "
+            "--port {port} --name BEN --seat {seat}'."
         ),
     )
     parser.add_argument(
@@ -927,9 +929,10 @@ def run_cli(argv: list[str] | None = None) -> int:
             is_ns = seat in (Seat.NORTH, Seat.SOUTH)
             return BlueChipSeatBot(
                 seat=seat,
-                controller_factory=lambda: SubprocessTcpBlueChipController(
+                controller_factory=lambda s=seat: SubprocessTcpBlueChipController(
                     cmd_template=cmd_template,
                     timeout_secs=timeout_secs,
+                    seat=s,
                 ),
                 team_ns="BlueChip" if is_ns else "Tenace",
                 team_ew="Tenace" if is_ns else "BlueChip",

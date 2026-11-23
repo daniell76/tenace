@@ -50,7 +50,7 @@ _PLAY_DUMMY_SLICE = slice(25 + NUM_CARDS, 25 + 2 * NUM_CARDS)
 _AUCTION_OWN_SLICE = slice(432, 432 + NUM_CARDS)
 
 _CONNECT_RE = re.compile(
-    r'^\s*Connecting\s+"(?P<client_name>[^"]*)"\s+as\s+\S+\s+using\s+protocol\s+version\s+\d+\s*$',
+    r'^\s*Connecting\s+"(?P<client_name>[^"]*)"\s+as\s+\S+\s+using\s+protocol\s+version\s+\d+(?:\s+.*)?$',
     re.IGNORECASE,
 )
 _PLAYER_ACTION_RE = re.compile(
@@ -62,7 +62,7 @@ _PLAYER_ACTION_RE = re.compile(
     r"|bids\s+(?P<level>[1-7])(?P<denom>NT|C|D|H|S)"
     r"|plays\s+(?P<rank>[23456789tjqka])(?P<suit>[cdhs])"
     r")"
-    r"(?:\s+.*)?$",
+    r"(?:\..*|\s+.*)?$",
     re.IGNORECASE,
 )
 _OBS_DEALER_RE = re.compile(r"^Dealer\s+(North|East|South|West)\s*$", re.MULTILINE)
@@ -72,6 +72,11 @@ _TIMING_LINE = (
     "Timing - N/S : this board  [0:05],  total  [0:05].  "
     "E/W : this board  [0:05],  total  [0:05]"
 )
+
+
+def _wire_seat_name(seat: Seat) -> str:
+    """Return canonical BlueChip v18 Title-Case compass seat name ('North', 'East', 'South', 'West')."""
+    return Seat(seat).name.title()
 
 
 def format_bluechip_deal_header(
@@ -95,7 +100,7 @@ def format_bluechip_deal_header(
     else:
         vul_text = "Neither vulnerable."
 
-    return f"Board number {board_number}. Dealer {dealer_seat.name}. {vul_text}"
+    return f"Board number {board_number}. Dealer {_wire_seat_name(dealer_seat)}. {vul_text}"
 
 
 def format_bluechip_hand(cards: list[int]) -> str:
@@ -117,7 +122,9 @@ def format_bluechip_hand(cards: list[int]) -> str:
         suits_ranks[s_idx].append(RANK_CHARS[r_idx])
 
     parts: list[str] = []
-    for s_idx, suit_char in enumerate(SUIT_CHARS):
+    # WBF BlueChip v18 transmits suits in descending bridge order: Spades, Hearts, Diamonds, Clubs.
+    for s_idx in (int(Suit.SPADES), int(Suit.HEARTS), int(Suit.DIAMONDS), int(Suit.CLUBS)):
+        suit_char = SUIT_CHARS[s_idx]
         if suits_ranks[s_idx]:
             parts.append(f"{suit_char} {' '.join(suits_ranks[s_idx])}.")
         else:
@@ -264,13 +271,24 @@ class SocketBlueChipController:
 class SubprocessTcpBlueChipController:
     """Spawns a BlueChip bridge subprocess (e.g. WBridge5 or BEN) and connects via loopback TCP."""
 
-    def __init__(self, cmd_template: str, timeout_secs: float = 60.0) -> None:
+    def __init__(
+        self,
+        cmd_template: str,
+        timeout_secs: float = 60.0,
+        seat: Seat | None = None,
+    ) -> None:
         if "{port}" not in cmd_template:
             raise ValueError(
                 "cmd_template must contain '{port}' placeholder for TCP callback port"
             )
+        if "{seat}" in cmd_template and seat is None:
+            raise ValueError(
+                "cmd_template contains '{seat}' placeholder but seat was not provided"
+            )
         self._socket_ctrl = SocketBlueChipController(timeout_secs=timeout_secs)
         cmd_str = cmd_template.replace("{port}", str(self._socket_ctrl.port))
+        if seat is not None:
+            cmd_str = cmd_str.replace("{seat}", _wire_seat_name(seat))
         argv = shlex.split(cmd_str)
         if not argv:
             self._socket_ctrl.close()
@@ -473,9 +491,9 @@ class BlueChipSeatBot:
             if m_conn is None:
                 raise ValueError(f"Invalid BlueChip greeting: {line!r}")
             client_name = m_conn.group("client_name")
-            ctrl.send_line(f'{self.seat.name} ("{client_name}") seated')
+            ctrl.send_line(f'{_wire_seat_name(self.seat)} ("{client_name}") seated')
             self._expect_match(self._ready_for_teams_re)
-            ctrl.send_line(f'Teams: N/S "{self._team_ns}" E/W "{self._team_ew}"')
+            ctrl.send_line(f'Teams : N/S : "{self._team_ns}" E/W : "{self._team_ew}"')
             self._expect_match(self._ready_to_start_re)
         except BaseException:
             self.close()
@@ -549,7 +567,7 @@ class BlueChipSeatBot:
             self._expect_match(self._ready_for_deal_re)
             ctrl.send_line(format_bluechip_deal_header(self._board_number, dealer, ns_vul, ew_vul))
             self._expect_match(self._ready_for_cards_re)
-            ctrl.send_line(f"{self.seat.name}'s cards: {format_bluechip_hand(own_13)}")
+            ctrl.send_line(f"{_wire_seat_name(self.seat)}'s cards: {format_bluechip_hand(own_13)}")
             self._board_started = True
 
         auction_len = len(auction_calls)
@@ -580,12 +598,12 @@ class BlueChipSeatBot:
             other_tok = m_ready.group("other")
             if other_tok.lower() == "dummy":
                 assert dummy_seat is not None
-                actor_name = dummy_seat.name
+                actor_name = _wire_seat_name(dummy_seat)
             elif idx < auction_len:
-                actor_name = auction_calls[idx][0].name
+                actor_name = _wire_seat_name(auction_calls[idx][0])
             else:
                 play_idx = idx - auction_len
-                actor_name = card_hand_seats[play_idx].name
+                actor_name = _wire_seat_name(card_hand_seats[play_idx])
 
             ctrl.send_line(f"{actor_name} {openspiel_action_to_bluechip(action)}")
             self._synced_public_actions.append(action)
@@ -643,7 +661,7 @@ class BlueChipSeatBot:
             if dummy_seat is not None and next_leader == dummy_seat:
                 self._controller.send_line("Dummy to lead")
             else:
-                self._controller.send_line(f"{self.seat.name} to lead")
+                self._controller.send_line(f"{_wire_seat_name(self.seat)} to lead")
 
         reply = self._controller.read_line()
         reply_seat, chosen_action = _parse_bluechip_player_action_with_seat(reply)

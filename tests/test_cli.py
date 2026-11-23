@@ -26,6 +26,7 @@ import socket
 import sys
 
 port = int(sys.argv[1])
+expected_seat_arg = sys.argv[2] if len(sys.argv) > 2 else None
 with socket.create_connection(("127.0.0.1", port), timeout=10.0) as sock:
     rfile = sock.makefile("r", encoding="ascii", newline="\\r\\n")
 
@@ -71,20 +72,22 @@ with socket.create_connection(("127.0.0.1", port), timeout=10.0) as sock:
     if not seated:
         sys.exit(0)
     seat = seated.split()[0]
+    if expected_seat_arg is not None and seat != expected_seat_arg:
+        raise RuntimeError(f"Expected --seat arg {expected_seat_arg!r}, got {seat!r}")
     send(f"{seat} ready for teams")
     teams_line = recv()
     if not teams_line:
         sys.exit(0)
     expected_teams = (
-        'Teams: N/S "BlueChip" E/W "Tenace"'
-        if seat in ("NORTH", "SOUTH")
-        else 'Teams: N/S "Tenace" E/W "BlueChip"'
+        'Teams : N/S : "BlueChip" E/W : "Tenace"'
+        if seat in ("North", "South")
+        else 'Teams : N/S : "Tenace" E/W : "BlueChip"'
     )
     if teams_line != expected_teams:
         raise RuntimeError(f"Seat {seat} expected {expected_teams!r}, got {teams_line!r}")
     send(f"{seat} ready to start")
 
-    seats_order = ["NORTH", "EAST", "SOUTH", "WEST"]
+    seats_order = ["North", "East", "South", "West"]
     while True:
         line = recv()
         if not line:
@@ -95,7 +98,7 @@ with socket.create_connection(("127.0.0.1", port), timeout=10.0) as sock:
         deal_hdr = recv()
         if not deal_hdr:
             break
-        m_dealer = re.search(r"Dealer (NORTH|EAST|SOUTH|WEST)\\.", deal_hdr)
+        m_dealer = re.search(r"Dealer (North|East|South|West)\\.", deal_hdr)
         dealer = m_dealer.group(1)
         send(f"{seat} ready for cards")
         cards_line = recv()
@@ -109,7 +112,7 @@ with socket.create_connection(("127.0.0.1", port), timeout=10.0) as sock:
         has_bid = False
         last_bid_denom = "NT"
         first_bidder: dict[tuple[int, str], str] = {}
-        declarer = "NORTH"
+        declarer = "North"
         disconnected = False
 
         while True:
@@ -834,7 +837,7 @@ def test_cli_head_to_head_tenace_opponent_compares_two_model_profiles(monkeypatc
 
 
 def test_cli_bluechip_opponent_end_to_end_with_subprocess_peer(capsys):
-    cmd_template = f"{sys.executable} -c {shlex.quote(_BLUECHIP_SUBPROCESS_PEER)} {{port}}"
+    cmd_template = f"{sys.executable} -c {shlex.quote(_BLUECHIP_SUBPROCESS_PEER)} {{port}} {{seat}}"
     exit_code = run_cli(
         [
             "--mode",

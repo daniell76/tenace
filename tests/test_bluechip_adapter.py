@@ -72,16 +72,20 @@ class LoopbackBlueChipPeer:
                 return text
 
             send('Connecting "FakeWB5" as ANYPL using protocol version 18')
-            seated = recv()  # e.g. NORTH ("FakeWB5") seated
+            seated = recv()  # e.g. North ("FakeWB5") seated
             if not seated:
                 return
             seat = seated.split()[0]
             send(f"{seat} ready for teams")
-            if not recv():
+            teams_line = recv()
+            if not teams_line:
                 return
+            if not re.search(r'N/S : "([^"]+)" E/W : "([^"]+)"', teams_line):
+                raise AssertionError(f"Unexpected BlueChip teams line: {teams_line!r}")
             send(f"{seat} ready to start")
 
-            seats_order = ["NORTH", "EAST", "SOUTH", "WEST"]
+            seats_order = ["North", "East", "South", "West"]
+            assert seat in seats_order, f"Expected Title-Case seat name, got {seat!r}"
             suit_map = {"C": 0, "D": 1, "H": 2, "S": 3}
             rank_chars = "23456789tjqka"
             sp = "  " if self.wbridge5_double_spaces else " "
@@ -97,14 +101,15 @@ class LoopbackBlueChipPeer:
                 if not deal_hdr:
                     break
                 self.deal_headers.append(deal_hdr)
-                m_dealer = re.search(r"Dealer (NORTH|EAST|SOUTH|WEST)\.", deal_hdr)
-                assert m_dealer is not None
+                m_dealer = re.search(r"Dealer (North|East|South|West)\.", deal_hdr)
+                assert m_dealer is not None, f"Expected Title-Case dealer in {deal_hdr!r}"
                 dealer = m_dealer.group(1)
 
                 send(f"{seat} ready for cards")
-                cards_line = recv()  # SEAT's cards: C ... D ... H ... S ...
+                cards_line = recv()  # Seat's cards: S ... H ... D ... C ...
                 if not cards_line:
                     break
+                assert cards_line.startswith(f"{seat}'s cards: S "), cards_line
                 own_cards = self._parse_hand_line(cards_line)
                 dummy_cards: list[str] = []
 
@@ -115,7 +120,7 @@ class LoopbackBlueChipPeer:
                 last_bid_denom = "NT"
                 first_bidder: dict[tuple[int, str], str] = {}
                 winning_side = 0
-                declarer = "NORTH"
+                declarer = "North"
 
                 disconnected = False
                 while True:
@@ -139,6 +144,9 @@ class LoopbackBlueChipPeer:
                         if not obs_line:
                             disconnected = True
                             break
+                        assert obs_line.split()[0] == actor, (
+                            f"Expected Title-Case actor {actor!r}, got {obs_line!r}"
+                        )
                         if "PASSES" in obs_line:
                             passes += 1
                         elif "bids " in obs_line:
@@ -178,7 +186,7 @@ class LoopbackBlueChipPeer:
                             p_seat == dummy_seat and seat == declarer
                         )
                         if offset == 0 and is_our_action:
-                            to_lead = recv()  # "{SEAT|Dummy} to lead"
+                            to_lead = recv()  # "{Seat|Dummy} to lead"
                             if not to_lead:
                                 disconnected = True
                                 break
@@ -203,6 +211,9 @@ class LoopbackBlueChipPeer:
                             if not play_line:
                                 disconnected = True
                                 break
+                            assert play_line.split()[0] == p_seat, (
+                                f"Expected Title-Case actor {p_seat!r}, got {play_line!r}"
+                            )
                             card_tok = play_line.split("plays ")[1].split()[0].lower()
                             if p_seat == dummy_seat and card_tok in dummy_cards:
                                 dummy_cards.remove(card_tok)
@@ -287,23 +298,23 @@ def test_bluechip_package_exports():
 
 def test_bluechip_wire_formatting_helpers():
     assert format_bluechip_deal_header(1, dealer=Seat.NORTH, ns_vul=False, ew_vul=False) == (
-        "Board number 1. Dealer NORTH. Neither vulnerable."
+        "Board number 1. Dealer North. Neither vulnerable."
     )
     assert format_bluechip_deal_header(2, dealer=Seat.EAST, ns_vul=True, ew_vul=False) == (
-        "Board number 2. Dealer EAST. N/S vulnerable."
+        "Board number 2. Dealer East. N/S vulnerable."
     )
     assert format_bluechip_deal_header(3, dealer=Seat.SOUTH, ns_vul=False, ew_vul=True) == (
-        "Board number 3. Dealer SOUTH. E/W vulnerable."
+        "Board number 3. Dealer South. E/W vulnerable."
     )
     assert format_bluechip_deal_header(4, dealer=Seat.WEST, ns_vul=True, ew_vul=True) == (
-        "Board number 4. Dealer WEST. Both vulnerable."
+        "Board number 4. Dealer West. Both vulnerable."
     )
     with pytest.raises(ValueError):
         format_bluechip_deal_header(0, dealer=Seat.NORTH, ns_vul=False, ew_vul=False)
     with pytest.raises(ValueError):
         format_bluechip_deal_header(True, dealer=Seat.NORTH, ns_vul=False, ew_vul=False)
 
-    # Hand formatting with void in Diamonds ("D -.") and descending ranks in C, D, H, S order
+    # Hand formatting uses WBF BlueChip v18 order: S, H, D, C with void marker "-"
     sample_hand = [
         card_id(Suit.CLUBS, 12),  # CA
         card_id(Suit.CLUBS, 11),  # CK
@@ -319,9 +330,20 @@ def test_bluechip_wire_formatting_helpers():
         card_id(Suit.SPADES, 4),  # S6
         card_id(Suit.SPADES, 2),  # S4
     ]
-    assert format_bluechip_hand(sample_hand) == (
-        "C A K 2. D -. H Q 9 7 5 3. S J T 8 6 4."
+    formatted = format_bluechip_hand(sample_hand)
+    assert formatted == "S J T 8 6 4. H Q 9 7 5 3. D -. C A K 2."
+    # Verify exact PBN output under BEN TMClient.parse_hand() stripping rules
+    wire_line = f"North's cards: {formatted}"
+    pbn = (
+        wire_line[wire_line.index(":") + 1 : wire_line.rindex(".")]
+        .replace(" ", "")
+        .replace("-", "")
+        .replace("S", "")
+        .replace("H", "")
+        .replace("D", "")
+        .replace("C", "")
     )
+    assert pbn == "JT864.Q9753..AK2"
     with pytest.raises(ValueError):
         format_bluechip_hand(sample_hand[:12])
     with pytest.raises(ValueError):
@@ -343,16 +365,25 @@ def test_bluechip_wire_formatting_helpers():
     with pytest.raises(ValueError):
         openspiel_action_to_bluechip(True)
 
-    # Parsing player action lines including alerts, explanations, and whitespace
+    # Parsing player action lines including alerts, explanations, card-info dots, and casing
     assert parse_bluechip_player_action("NORTH PASSES") == 52
+    assert parse_bluechip_player_action("North passes") == 52
+    assert parse_bluechip_player_action("North passes.") == 52
     assert parse_bluechip_player_action("EAST DOUBLES Alert.") == 53
+    assert parse_bluechip_player_action("East doubles") == 53
     assert parse_bluechip_player_action("SOUTH REDOUBLES") == 54
+    assert parse_bluechip_player_action("South redoubles") == 54
     assert parse_bluechip_player_action("NORTH bids 1NT Alert.") == 59
+    assert parse_bluechip_player_action("North bids 1NT. Infos. 15-17") == 59
     assert parse_bluechip_player_action("  WEST   bids   2C   Alert. Stayman  ") == 60
     assert parse_bluechip_player_action("SOUTH plays kc") == 44
     assert parse_bluechip_player_action("SOUTH plays as") == 51
+    assert parse_bluechip_player_action("East plays AS. Forced") == 51
+    assert parse_bluechip_player_action("East plays KC.") == 44
     with pytest.raises(ValueError):
         parse_bluechip_player_action("NORTH bids 8NT")
+    with pytest.raises(ValueError):
+        parse_bluechip_player_action("NORTH plays 2Sx")
     with pytest.raises(ValueError):
         parse_bluechip_player_action("INVALID LINE")
 
@@ -387,8 +418,8 @@ def test_bluechip_seat_bot_plays_multi_board_duplicate_match_over_real_tcp():
     for p in peers:
         assert len(p.deal_headers) == 2
     all_headers = [h for p in peers for h in p.deal_headers]
-    assert any("Board number 1. Dealer NORTH. Neither vulnerable." == h for h in all_headers)
-    assert any("Board number 2. Dealer EAST. N/S vulnerable." == h for h in all_headers)
+    assert any("Board number 1. Dealer North. Neither vulnerable." == h for h in all_headers)
+    assert any("Board number 2. Dealer East. N/S vulnerable." == h for h in all_headers)
 
 
 def test_bluechip_seat_bot_dummy_lead_and_opening_leader_dummy_reveal():
@@ -476,7 +507,7 @@ def test_bluechip_seat_bot_dummy_lead_and_opening_leader_dummy_reveal():
 
     # 1. Opening leader EAST sent its opening lead, then received Dummy's cards BEFORE Trick 1 card 2
     east_log = peers[Seat.EAST].event_log
-    idx_east_lead = next(i for i, e in enumerate(east_log) if e.startswith("SEND: EAST plays "))
+    idx_east_lead = next(i for i, e in enumerate(east_log) if e.startswith("SEND: East plays "))
     idx_east_req_dummy = next(i for i, e in enumerate(east_log) if "ready for  dummy" in e)
     idx_east_recv_dummy = next(
         i for i, e in enumerate(east_log) if e.startswith("RECV: Dummy's cards:")
@@ -525,6 +556,82 @@ def test_subprocess_tcp_bluechip_controller_spawns_and_cleans_up_process():
     assert proc.poll() is not None
     # Idempotent close
     ctrl.close()
+
+    # Optional {seat} placeholder requires a seat argument and expands to Title Case
+    with pytest.raises(ValueError, match=r"\{seat\}"):
+        SubprocessTcpBlueChipController(
+            cmd_template=f"{sys.executable} -c 'pass' {{port}} {{seat}}",
+            timeout_secs=1.0,
+        )
+
+    seat_child = (
+        "import socket, sys, time\n"
+        "port = int(sys.argv[1])\n"
+        "seat = sys.argv[2]\n"
+        "s = socket.create_connection(('127.0.0.1', port), timeout=5.0)\n"
+        "msg = f'Connecting \"BEN\" as {seat} using protocol version 18 GIB-BBO 0.9.0.4\\r\\n'\n"
+        "s.sendall(msg.encode('ascii'))\n"
+        "line = s.makefile('r', encoding='ascii', newline='\\r\\n').readline().strip()\n"
+        "s.sendall((seat + '::' + line + '\\r\\n').encode('ascii'))\n"
+        "time.sleep(30)\n"
+    )
+    seat_cmd = f"{sys.executable} -c {shlex.quote(seat_child)} {{port}} {{seat}}"
+    seat_ctrl = SubprocessTcpBlueChipController(
+        cmd_template=seat_cmd,
+        timeout_secs=5.0,
+        seat=Seat.EAST,
+    )
+    try:
+        greeting = seat_ctrl.read_line()
+        assert greeting.startswith('Connecting "BEN" as East using protocol version 18 ')
+        seat_ctrl.send_line('East ("BEN") seated')
+        assert seat_ctrl.read_line() == 'East::East ("BEN") seated'
+    finally:
+        seat_ctrl.close()
+
+
+def test_bluechip_seat_bot_accepts_greeting_with_trailing_config_info():
+    class ScriptedTransport:
+        def __init__(self, lines: list[str]) -> None:
+            self._lines = list(lines)
+            self.sent: list[str] = []
+
+        def read_line(self) -> str:
+            return self._lines.pop(0)
+
+        def send_line(self, line: str) -> None:
+            self.sent.append(line)
+
+        def close(self) -> None:
+            return None
+
+    transport = ScriptedTransport(
+        [
+            'Connecting "BEN" as North using protocol version 18 GIB 0.9.0.4 config/default.conf',
+            "North ready for teams",
+            "North ready to start",
+            "North ready for deal",
+            "North ready for cards",
+            "North passes",
+        ]
+    )
+    game = pyspiel.load_game("bridge(use_double_dummy_result=false)")
+    state = game.new_initial_state()
+    for c in range(52):
+        state.apply_action(c)
+
+    bot = BlueChipSeatBot(
+        seat=Seat.NORTH,
+        controller_factory=lambda: transport,
+        team_ns="BlueChip",
+        team_ew="Tenace",
+    )
+    assert bot.step(state.clone()) == PASS_ACTION
+    assert transport.sent[0] == 'North ("BEN") seated'
+    assert transport.sent[1] == 'Teams : N/S : "BlueChip" E/W : "Tenace"'
+    assert transport.sent[2] == "Start of board"
+    assert transport.sent[3] == "Board number 1. Dealer North. Neither vulnerable."
+    assert transport.sent[4].startswith("North's cards: S ")
 
 
 def test_bluechip_seat_bot_reset_for_board_recovers_if_unfinished_board_aborted():
