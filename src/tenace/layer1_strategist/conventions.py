@@ -27,6 +27,7 @@ SAYC_CONVENTION_CARD = ConventionCard(
     name="SAYC (Standard American Yellow Card)",
     summary_rules=(
         "5-card majors (1H/1S promise 5+ cards; 1C/1D may be 3+ cards). "
+        "Over 1C - 1D, bid 4-card majors up the line (rebid 1H/1S rather than bypassing them with 1NT). "
         "Respond to partner's 1-level suit opening with 6+ HCP (new suit at 1-level or 2-level is forcing 1 round; "
         "1NT response is 6-10 non-forcing; single major raise 2M is 6-9 pts — opener invites game with 16-18 pts "
         "or bids 4M with 19+ pts). "

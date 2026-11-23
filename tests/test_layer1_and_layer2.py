@@ -204,6 +204,7 @@ def test_convention_card_immutability_and_zero_partner_state_leakage():
     assert "20-21" in SAYC_CONVENTION_CARD.summary_rules or "20–21" in SAYC_CONVENTION_CARD.summary_rules
     assert "1nt overcall" in rules_lower
     assert "penalty doubles at 4/5-level" in rules_lower
+    assert "up the line" in rules_lower
     assert "attitude" in rules_lower and "count" in rules_lower
 
     # Empty or whitespace strings must be rejected
