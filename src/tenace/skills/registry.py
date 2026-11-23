@@ -31,6 +31,7 @@ __all__ = [
     "load_bidding_skill",
     "parse_skill_markdown",
     "parse_skill_metadata",
+    "render_skill_markdown",
     "validate_skill_slug",
 ]
 
@@ -147,15 +148,15 @@ def _parse_meta_dict(raw: dict[str, str], *, is_builtin: bool) -> BiddingSkillMe
     )
 
 
-def _extract_sections(body: str) -> tuple[str, str]:
-    """Split Markdown body into `(summary_rules, detailed_rules)`."""
+def _extract_sections(body: str) -> tuple[str, str, str]:
+    """Split Markdown body into `(summary_rules, detailed_rules, calibration_notes)`."""
     text = body.strip()
     if not text:
         raise ValueError("SKILL.md must define non-empty 'Summary Rules' body text")
 
     matches = list(_HEADING_RE.finditer(text))
     if not matches:
-        return text, ""
+        return text, "", ""
 
     sections: list[tuple[str, str]] = []
     preamble = text[: matches[0].start()].strip()
@@ -168,12 +169,15 @@ def _extract_sections(body: str) -> tuple[str, str]:
 
     summary_parts: list[str] = []
     detailed_parts: list[str] = []
+    calibration_parts: list[str] = []
     for heading, content in sections:
         if not content:
             continue
         heading_key = heading.lower()
         if heading_key in ("summary rules", "summary", "rules"):
             summary_parts.append(content)
+        elif heading_key in ("calibration notes", "calibration overrides", "calibration"):
+            calibration_parts.append(content)
         else:
             detailed_parts.append(f"### {heading}\n{content}")
 
@@ -187,9 +191,10 @@ def _extract_sections(body: str) -> tuple[str, str]:
 
     summary_rules = "\n\n".join(summary_parts).strip()
     detailed_rules = "\n\n".join(detailed_parts).strip()
+    calibration_notes = "\n\n".join(calibration_parts).strip()
     if not summary_rules:
         raise ValueError("SKILL.md '## Summary Rules' section cannot be empty")
-    return summary_rules, detailed_rules
+    return summary_rules, detailed_rules, calibration_notes
 
 
 class BiddingSkillMeta(BaseModel):
@@ -216,6 +221,7 @@ class BiddingSkill(BaseModel):
     meta: BiddingSkillMeta
     summary_rules: str
     detailed_rules: str = ""
+    calibration_notes: str = ""
     source_path: Path | None = Field(default=None)
 
     def to_convention_card(self) -> ConventionCard:
@@ -226,7 +232,63 @@ class BiddingSkill(BaseModel):
             name=self.meta.name,
             summary_rules=self.summary_rules,
             detailed_rules=self.detailed_rules,
+            calibration_notes=self.calibration_notes,
         )
+
+
+def _yaml_scalar(value: str) -> str:
+    if any(ch in value for ch in (":", "#", '"', "'", "\n")) or value.strip() != value:
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+        return f'"{escaped}"'
+    return value
+
+
+def render_skill_markdown(
+    meta: BiddingSkillMeta,
+    *,
+    summary_rules: str,
+    detailed_rules: str = "",
+    calibration_notes: str = "",
+) -> str:
+    """Serialize a bidding-system skill cleanly to `SKILL.md` markdown with YAML frontmatter."""
+    fm_lines = [
+        "---",
+        f"id: {validate_skill_slug(meta.id)}",
+        f"name: {_yaml_scalar(meta.name.strip())}",
+        f"version: {_yaml_scalar(meta.version.strip() or '1.0')}",
+        f"description: {_yaml_scalar(meta.description.strip())}",
+    ]
+    if meta.nt_range:
+        fm_lines.append(f"nt_range: {_yaml_scalar(meta.nt_range.strip())}")
+    if meta.slam_control:
+        fm_lines.append(f"slam_control: {_yaml_scalar(meta.slam_control.strip())}")
+    if meta.opening_style:
+        fm_lines.append(f"opening_style: {_yaml_scalar(meta.opening_style.strip())}")
+    fm_lines.append("---")
+
+    parts = [
+        "\n".join(fm_lines),
+        f"## Summary Rules\n\n{summary_rules.strip()}",
+    ]
+    ref_body = detailed_rules.strip()
+    if ref_body:
+        # Convert stored `### <Heading>` blocks back into top-level `## <Heading>` sections.
+        sub_blocks = re.split(r"(?m)^###\s+", ref_body)
+        if len(sub_blocks) > 1 and not sub_blocks[0].strip():
+            for blk in sub_blocks[1:]:
+                first_nl = blk.find("\n")
+                if first_nl == -1:
+                    continue
+                heading = blk[:first_nl].strip()
+                content = blk[first_nl + 1 :].strip()
+                if heading and content:
+                    parts.append(f"## {heading}\n\n{content}")
+        else:
+            parts.append(f"## Reference Guide\n\n{ref_body}")
+    cal_body = calibration_notes.strip()
+    if cal_body:
+        parts.append(f"## Calibration Notes\n\n{cal_body}")
+    return "\n\n".join(parts) + "\n"
 
 
 def parse_skill_metadata(
@@ -244,11 +306,12 @@ def parse_skill_markdown(
 ) -> BiddingSkill:
     raw, body = _split_frontmatter(markdown_text)
     meta = _parse_meta_dict(raw, is_builtin=is_builtin)
-    summary_rules, detailed_rules = _extract_sections(body)
+    summary_rules, detailed_rules, calibration_notes = _extract_sections(body)
     return BiddingSkill(
         meta=meta,
         summary_rules=summary_rules,
         detailed_rules=detailed_rules,
+        calibration_notes=calibration_notes,
         source_path=source_path,
     )
 

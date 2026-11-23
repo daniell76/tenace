@@ -13,7 +13,7 @@ from tenace.harness.duplicate import (
     RoomTranscript,
     wbf_board_params,
 )
-from tenace.harness.scoring import score_diff_to_imps
+from tenace.harness.scoring import score_diff_to_imps, wbf_continuous_vp
 
 __all__ = [
     "BlueChipLineTransport",
@@ -28,4 +28,5 @@ __all__ = [
     "SubprocessTcpBlueChipController",
     "score_diff_to_imps",
     "wbf_board_params",
+    "wbf_continuous_vp",
 ]

@@ -12,6 +12,7 @@ from tenace.skills.registry import (
     load_bidding_skill,
     parse_skill_markdown,
     parse_skill_metadata,
+    render_skill_markdown,
     validate_skill_slug,
 )
 
@@ -27,5 +28,6 @@ __all__ = [
     "load_bidding_skill",
     "parse_skill_markdown",
     "parse_skill_metadata",
+    "render_skill_markdown",
     "validate_skill_slug",
 ]

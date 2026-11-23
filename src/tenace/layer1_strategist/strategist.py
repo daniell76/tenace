@@ -22,7 +22,9 @@ from tenace.layer3_rules.tracker import BoardFactSnapshot, trick_winner
 from tenace.models.clients import StructuredModelClient
 
 __all__ = [
+    "DEFAULT_L1_AUCTION_DIRECTIVE",
     "StrategistEngine",
+    "build_strategist_system_prompt",
     "format_auction_sequence",
     "format_cards_by_suit",
     "format_contract_summary",
@@ -30,6 +32,57 @@ __all__ = [
     "format_play_state",
     "format_vulnerability",
 ]
+
+DEFAULT_L1_AUCTION_DIRECTIVE = (
+    "During AUCTION: Start `plan_summary` by explicitly stating the single recommended call "
+    "for the LIVE turn (e.g., 'Bid 2NT...' or 'Raise to 4H...' or 'Pass...'). Follow the "
+    "exact Partnership System rules above for opening thresholds, artificial bids, weak/strong "
+    "openings, and slam/keycard asking responses — do NOT pass qualifying opening hands "
+    "merely for a singleton honor or weak suit. Always honor forcing partnership bids and "
+    "relays defined by the active system, and never drop a forcing call. Factor in Duplicate "
+    "IMP scoring and vulnerability: push/accept close game invites (~24-25+ combined pts with "
+    "a long suit or good honors) especially when VULNERABLE (+500 game bonus only needs ~37% odds!)."
+)
+
+
+def build_strategist_system_prompt(
+    convention_card: ConventionCard,
+    phase: str = "auction",
+) -> str:
+    """Render the exact Layer-1 Strategist system prompt for `convention_card` and `phase`."""
+    detailed_section = ""
+    if phase == "auction" and convention_card.detailed_rules:
+        detailed_section = (
+            f"Detailed Reference Guide:\n{convention_card.detailed_rules}\n\n"
+        )
+    calibration_section = ""
+    if convention_card.calibration_notes:
+        calibration_section = (
+            f"Calibration Notes (Active Hill-Climb Refinements):\n"
+            f"{convention_card.calibration_notes}\n\n"
+        )
+    directive = (
+        convention_card.l1_auction_directive
+        if convention_card.l1_auction_directive
+        else DEFAULT_L1_AUCTION_DIRECTIVE
+    )
+    return (
+        "You are Tenace Layer 1 Strategist, an expert Contract Bridge planner.\n"
+        f"Partnership System: {convention_card.name}\n"
+        f"Convention Summary: {convention_card.summary_rules}\n\n"
+        f"{detailed_section}"
+        f"{calibration_section}"
+        "Synthesize a coherent multi-trick or multi-round StrategyState based ONLY on "
+        "legal public information and your own visible cards.\n"
+        f"{directive}\n"
+        "Constraint syntax rules for `seat_constraints`:\n"
+        "- Outer keys and inner `seat` values must use seat names: "
+        '"NORTH", "EAST", "SOUTH", or "WEST".\n'
+        "- Suit keys in `min_suit_lengths` and `max_suit_lengths` must use suit names: "
+        '"CLUBS", "DIAMONDS", "HEARTS", or "SPADES".\n'
+        "- `likely_cards` accepts canonical card strings like \"S:A\" or \"H:K\" (or omit/empty list `[]`).\n"
+        "- Ensure `min_hcp <= max_hcp` (0..37) and `min_suit_lengths[s] <= max_suit_lengths[s]` (0..13)."
+    )
 
 _SUIT_DISPLAY_ORDER = (Suit.SPADES, Suit.HEARTS, Suit.DIAMONDS, Suit.CLUBS)
 
@@ -205,34 +258,9 @@ class StrategistEngine:
         if facts.phase == "terminal":
             raise ValueError("Cannot plan on terminal board")
 
-        detailed_section = ""
-        if facts.phase == "auction" and self.convention_card.detailed_rules:
-            detailed_section = (
-                f"Detailed Reference Guide:\n{self.convention_card.detailed_rules}\n\n"
-            )
-
-        system_prompt = (
-            "You are Tenace Layer 1 Strategist, an expert Contract Bridge planner.\n"
-            f"Partnership System: {self.convention_card.name}\n"
-            f"Convention Summary: {self.convention_card.summary_rules}\n\n"
-            f"{detailed_section}"
-            "Synthesize a coherent multi-trick or multi-round StrategyState based ONLY on "
-            "legal public information and your own visible cards.\n"
-            "During AUCTION: Start `plan_summary` by explicitly stating the single recommended call "
-            "for the LIVE turn (e.g., 'Bid 2NT...' or 'Raise to 4H...' or 'Pass...'). Follow the "
-            "exact Partnership System rules above for opening thresholds, artificial bids, weak/strong "
-            "openings, and slam/keycard asking responses — do NOT pass qualifying opening hands "
-            "merely for a singleton honor or weak suit. Always honor forcing partnership bids and "
-            "relays defined by the active system, and never drop a forcing call. Factor in Duplicate "
-            "IMP scoring and vulnerability: push/accept close game invites (~24-25+ combined pts with "
-            "a long suit or good honors) especially when VULNERABLE (+500 game bonus only needs ~37% odds!).\n"
-            "Constraint syntax rules for `seat_constraints`:\n"
-            "- Outer keys and inner `seat` values must use seat names: "
-            '"NORTH", "EAST", "SOUTH", or "WEST".\n'
-            "- Suit keys in `min_suit_lengths` and `max_suit_lengths` must use suit names: "
-            '"CLUBS", "DIAMONDS", "HEARTS", or "SPADES".\n'
-            "- `likely_cards` accepts canonical card strings like \"S:A\" or \"H:K\" (or omit/empty list `[]`).\n"
-            "- Ensure `min_hcp <= max_hcp` (0..37) and `min_suit_lengths[s] <= max_suit_lengths[s]` (0..13)."
+        system_prompt = build_strategist_system_prompt(
+            self.convention_card,
+            phase=facts.phase,
         )
 
         dummy_line = (

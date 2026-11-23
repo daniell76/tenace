@@ -8,6 +8,11 @@ from tenace.harness import (
     SocketBlueChipController,
     SubprocessTcpBlueChipController,
 )
+from tenace.hillclimb import (
+    HillClimbEngine,
+    HillClimbStore,
+    PromptVariables,
+)
 from tenace.layer1_strategist import SAYC_CONVENTION_CARD, ConventionCard
 from tenace.layer2_evaluator import DiffusionOptionEvaluator, TacticalOptionEvaluator
 from tenace.models import (
@@ -33,6 +38,9 @@ __all__ = [
     "DiffusionOptionEvaluator",
     "DuplicateMatchRunner",
     "GeminiDecisionsClient",
+    "HillClimbEngine",
+    "HillClimbStore",
+    "PromptVariables",
     "RoomTranscript",
     "SAYC_CONVENTION_CARD",
     "Seat",

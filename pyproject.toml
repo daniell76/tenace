@@ -26,6 +26,7 @@ dev = [
 [project.scripts]
 tenace-match = "tenace.cli:main"
 tenace-serve = "tenace.server:main"
+tenace-hillclimb = "tenace.hillclimb.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tenace"]

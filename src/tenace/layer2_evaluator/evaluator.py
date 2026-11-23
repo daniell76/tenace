@@ -20,7 +20,60 @@ from tenace.layer1_strategist import (
 from tenace.layer3_rules.tracker import BoardFactSnapshot
 from tenace.models.clients import StructuredModelClient
 
-__all__ = ["DiffusionOptionEvaluator", "TacticalOptionEvaluator"]
+__all__ = [
+    "DEFAULT_L2_AUCTION_SYSTEM_PROMPT",
+    "DEFAULT_L2_DISCIPLINE_COMPETITIVE",
+    "DEFAULT_L2_DISCIPLINE_PARTNER_ACTIVE",
+    "DEFAULT_L2_DISCIPLINE_UNOPENED",
+    "DiffusionOptionEvaluator",
+    "TacticalOptionEvaluator",
+]
+
+DEFAULT_L2_AUCTION_SYSTEM_PROMPT = (
+    "You are Tenace Layer 2 Tactical Option Evaluator (Bridge Auction).\n"
+    "Score each legal auction call in [0.0, 1.0] under `option_scores` keyed by "
+    "the exact candidate label following the partnership convention system.\n"
+    "Discipline rules: Follow the active partnership system's exact opening thresholds, "
+    "forcing bids, artificial calls, and slam/keycard tables; avoid reckless low-level "
+    "doubles or escaping doubled contracts into hopeless higher bids; NEVER bid slams "
+    "(6/7-level) without slam values and Ace/keycard control checks. NOTE: candidate "
+    "baseline_ev values naively assume all opponents immediately pass without doubling — "
+    "prioritize sound partnership bidding over pass-out double-dummy EV.\n"
+    "Set `assumption_violated` to true ONLY if observed calls directly contradict "
+    "a critical Layer 1 assumption. Keep `rationale` to one brief sentence and "
+    "leave `violation_reason` empty unless `assumption_violated` is true."
+)
+
+DEFAULT_L2_DISCIPLINE_PARTNER_ACTIVE = (
+    "Discipline: Partner has entered the auction — follow the LIVE auction, "
+    "Active Strategy, and the exact Partnership Bidding System rules above. "
+    "NEVER drop or pass a forcing bid or artificial relay (new-suit forcing calls, "
+    "strong forcing openings, Stayman, transfers, checkback, or negative doubles "
+    "without a penalty trump stack). Invite or bid game aggressively when combined "
+    "strength reaches game values with a fit, and support/cuebid partner's overcall "
+    "according to the system rules. When opponents sacrifice over our own cuebid/game "
+    "auction, do NOT let them buy it undoubled — double for penalty or bid on with "
+    "extra shape/strength. Slams: use the partnership system's exact 4NT Ace/keycard "
+    "ask and response table above (do NOT mix Blackwood and RKCB!) before bidding "
+    "6/7-level slams; after partner answers 4NT, NEVER pass out the artificial "
+    "response when holding enough Aces/keycards for slam — bid the slam, or sign off "
+    "at the 5-level if missing 2+ keycards."
+)
+
+DEFAULT_L2_DISCIPLINE_COMPETITIVE = (
+    "Discipline: Opponents have opened. Enter only with a sound overcall, takeout "
+    "double, two-suited bid, or preempt permitted by the active system above; "
+    "compete thoughtfully by shape and vulnerability. Avoid reckless low-level "
+    "doubles or blind slams without control checks."
+)
+
+DEFAULT_L2_DISCIPLINE_UNOPENED = (
+    "Discipline: Unopened auction — Open hands that qualify under the active "
+    "Partnership Bidding System rules above (do NOT pass a qualifying opening hand "
+    "merely for a singleton honor or weak suit); pass below opening strength unless "
+    "holding a valid weak/preemptive opening defined by the system. Avoid "
+    "speculative slams or off-shape bids."
+)
 
 
 class TacticalOptionEvaluator:
@@ -44,20 +97,7 @@ class TacticalOptionEvaluator:
             raise ValueError("candidates must be non-empty")
 
         if facts.phase == "auction":
-            system_prompt = (
-                "You are Tenace Layer 2 Tactical Option Evaluator (Bridge Auction).\n"
-                "Score each legal auction call in [0.0, 1.0] under `option_scores` keyed by "
-                "the exact candidate label following the partnership convention system.\n"
-                "Discipline rules: Follow the active partnership system's exact opening thresholds, "
-                "forcing bids, artificial calls, and slam/keycard tables; avoid reckless low-level "
-                "doubles or escaping doubled contracts into hopeless higher bids; NEVER bid slams "
-                "(6/7-level) without slam values and Ace/keycard control checks. NOTE: candidate "
-                "baseline_ev values naively assume all opponents immediately pass without doubling — "
-                "prioritize sound partnership bidding over pass-out double-dummy EV.\n"
-                "Set `assumption_violated` to true ONLY if observed calls directly contradict "
-                "a critical Layer 1 assumption. Keep `rationale` to one brief sentence and "
-                "leave `violation_reason` empty unless `assumption_violated` is true."
-            )
+            system_prompt = DEFAULT_L2_AUCTION_SYSTEM_PROMPT
         else:
             system_prompt = (
                 "You are Tenace Layer 2 Tactical Option Evaluator.\n"
@@ -138,46 +178,30 @@ class TacticalOptionEvaluator:
                 for s, call in facts.auction_calls
             )
             any_bid_made = any(call != PASS_ACTION for _s, call in facts.auction_calls)
+            overrides = self.convention_card.l2_discipline_overrides
             if partner_has_acted:
-                discipline_line = (
-                    "Discipline: Partner has entered the auction — follow the LIVE auction, "
-                    "Active Strategy, and the exact Partnership Bidding System rules above. "
-                    "NEVER drop or pass a forcing bid or artificial relay (new-suit forcing calls, "
-                    "strong forcing openings, Stayman, transfers, checkback, or negative doubles "
-                    "without a penalty trump stack). Invite or bid game aggressively when combined "
-                    "strength reaches game values with a fit, and support/cuebid partner's overcall "
-                    "according to the system rules. When opponents sacrifice over our own cuebid/game "
-                    "auction, do NOT let them buy it undoubled — double for penalty or bid on with "
-                    "extra shape/strength. Slams: use the partnership system's exact 4NT Ace/keycard "
-                    "ask and response table above (do NOT mix Blackwood and RKCB!) before bidding "
-                    "6/7-level slams; after partner answers 4NT, NEVER pass out the artificial "
-                    "response when holding enough Aces/keycards for slam — bid the slam, or sign off "
-                    "at the 5-level if missing 2+ keycards."
+                discipline_line = overrides.get(
+                    "partner_active", DEFAULT_L2_DISCIPLINE_PARTNER_ACTIVE
                 )
             elif any_bid_made:
-                discipline_line = (
-                    "Discipline: Opponents have opened. Enter only with a sound overcall, takeout "
-                    "double, two-suited bid, or preempt permitted by the active system above; "
-                    "compete thoughtfully by shape and vulnerability. Avoid reckless low-level "
-                    "doubles or blind slams without control checks."
+                discipline_line = overrides.get(
+                    "competitive", DEFAULT_L2_DISCIPLINE_COMPETITIVE
                 )
             else:
-                discipline_line = (
-                    "Discipline: Unopened auction — Open hands that qualify under the active "
-                    "Partnership Bidding System rules above (do NOT pass a qualifying opening hand "
-                    "merely for a singleton honor or weak suit); pass below opening strength unless "
-                    "holding a valid weak/preemptive opening defined by the system. Avoid "
-                    "speculative slams or off-shape bids."
+                discipline_line = overrides.get(
+                    "unopened", DEFAULT_L2_DISCIPLINE_UNOPENED
                 )
-            user_lines.extend(
-                [
-                    "=== Partnership Bidding System ===",
-                    f"System: {self.convention_card.name}",
-                    f"Rules: {self.convention_card.summary_rules}",
-                    discipline_line,
-                    "",
-                ]
-            )
+            system_block = [
+                "=== Partnership Bidding System ===",
+                f"System: {self.convention_card.name}",
+                f"Rules: {self.convention_card.summary_rules}",
+            ]
+            if self.convention_card.calibration_notes:
+                system_block.append(
+                    f"Calibration Notes: {self.convention_card.calibration_notes}"
+                )
+            system_block.extend([discipline_line, ""])
+            user_lines.extend(system_block)
         user_lines.extend(
             [
                 "=== Active Strategy ===",
