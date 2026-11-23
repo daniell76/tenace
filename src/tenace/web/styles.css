@@ -1241,6 +1241,40 @@ body.classic-deck .on-dark .suit-clubs {
   color: var(--text-sand);
 }
 
+.skill-preview-details {
+  margin-top: 0.15rem;
+  border: 1px solid hsla(40, 28%, 40%, 0.32);
+  border-radius: var(--radius-sm);
+  background: hsla(28, 26%, 9%, 0.55);
+  padding: 0.35rem 0.55rem;
+}
+
+.skill-preview-details summary {
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--brass-bright);
+  user-select: none;
+}
+
+.skill-preview-body {
+  margin-top: 0.4rem;
+  max-height: 220px;
+  overflow-y: auto;
+  font-size: 0.73rem;
+  line-height: 1.45;
+  color: var(--text-sand);
+  white-space: pre-wrap;
+}
+
+.skill-preview-meta {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--brass-bright);
+  margin-bottom: 0.3rem;
+}
+
 .strategy-feed-list {
   display: flex;
   flex-direction: column;

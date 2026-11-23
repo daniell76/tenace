@@ -468,8 +468,8 @@ class GeminiDecisionsClient:
                         "live auction (including forcing bids and partner's calls), partnership "
                         "bidding system, and the Active Strategy's explicitly recommended call? "
                         "Score the recommended call in Active Strategy highest (score 4) when consistent with "
-                        "the live auction (including 4NT Blackwood, 6-level slam completions after Ace checks "
-                        "5C=0/4 5D=1 5H=2 5S=3, cuebids, and game invites)."
+                        "the live auction (including 4NT Ace/keycard ask responses per the active "
+                        "bidding system, 6-level slam completions after keycard checks, cuebids, and game invites)."
                     ),
                     "criteria": list(_AUCTION_SCORE_CRITERIA),
                 }

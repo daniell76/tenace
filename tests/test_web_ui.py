@@ -585,6 +585,29 @@ const northAiTurnState = {
       },
     })
   );
+  enqueueFetch("/v1/skills", () =>
+    makeJsonResponse(200, {
+      default_system: "sayc",
+      skills: [
+        {
+          id: "sayc",
+          name: "SAYC (Standard American Yellow Card)",
+          version: "1.0",
+          description: "5-card majors.",
+          nt_range: "15-17",
+          is_builtin: true,
+        },
+        {
+          id: "ccba",
+          name: "CCBA Natural (2/1 GF Standard)",
+          version: "1.0",
+          description: "CCBA 2/1 GF.",
+          nt_range: "15-17",
+          is_builtin: true,
+        },
+      ],
+    })
+  );
   enqueueFetch("/v1/table/state", () => makeJsonResponse(200, southTurnState));
 
   require(appPath);
@@ -719,6 +742,32 @@ const northAiTurnState = {
 
   resolveMatch();
   await run1;
+
+  // 6. Verify dynamic bidding-system selector forwarding & lazy /v1/skills/{id} preview
+  assert.equal(getEl("bidding-system-select").value, "sayc");
+  const matchCall = fetchCalls.find((c) => c.url === "/v1/match");
+  const matchPayload = JSON.parse(matchCall.opts.body);
+  assert.equal(matchPayload.team_a_system, "sayc");
+  assert.equal(matchPayload.team_b_system, "sayc");
+
+  enqueueFetch("/v1/skills/ccba", () =>
+    makeJsonResponse(200, {
+      id: "ccba",
+      name: "CCBA Natural (2/1 GF Standard)",
+      version: "1.0",
+      description: "CCBA 2/1 GF.",
+      nt_range: "15-17",
+      is_builtin: true,
+      summary_rules: "RKCB 1430 and semi-forcing 1NT.",
+      detailed_rules: "Key Differences vs. SAYC",
+    })
+  );
+  getEl("bidding-system-select").value = "ccba";
+  getEl("bidding-skill-details").open = true;
+  await getEl("bidding-skill-details").dispatch("toggle");
+  await new Promise((r) => setImmediate(r));
+  assert.ok(getEl("bidding-skill-preview").innerHTML.includes("RKCB 1430"));
+
   console.log(JSON.stringify({ controllerOk: true }));
 })().catch((err) => {
   console.error(err);

@@ -69,7 +69,7 @@ from tenace.harness.duplicate import (
     MatchSummary,
     wbf_board_params,
 )
-from tenace.layer1_strategist import SAYC_CONVENTION_CARD
+from tenace.layer1_strategist import ConventionCard
 from tenace.layer3_rules import (
     RuleDDSEvaluator,
     RuleFactTracker,
@@ -77,6 +77,15 @@ from tenace.layer3_rules import (
     trick_winner,
 )
 from tenace.models.clients import StructuredModelClient
+from tenace.skills import (
+    BiddingSkill,
+    BiddingSkillMeta,
+    SkillNotFoundError,
+    SkillRegistry,
+    default_bidding_system_from_env,
+    default_skill_registry,
+    validate_skill_slug,
+)
 
 SERVICE_VERSION = "0.1.0"
 _MAX_CACHED_PROFILES = 16
@@ -97,6 +106,8 @@ _ACTION_LABEL_TO_ID: dict[str, int] = {
 __all__ = [
     "MatchRequest",
     "MatchResponse",
+    "SkillDetailResponse",
+    "SkillListResponse",
     "StepRequest",
     "StepResponse",
     "TableStateRequest",
@@ -235,6 +246,8 @@ class StepRequest(BaseModel):
     action_history: list[StrictToken] = Field(default_factory=list)
     prior_strategy: StrategyState | None = None
     profile: ModelProfile | None = None
+    bidding_system: StrictStr | None = None
+    convention_card: ConventionCard | None = None
     dds_worlds: int | None = Field(default=None, ge=1, le=256)
     seed: int = Field(default=42, ge=0, le=_MAX_INT32)
     bot: Literal["tenace", "baseline"] = "tenace"
@@ -264,6 +277,12 @@ class StepRequest(BaseModel):
             )
         if self.tournament_seed is not None and self.dummy_hand is not None:
             raise ValueError("'dummy_hand' cannot be combined with 'tournament_seed'")
+        if self.bidding_system is not None and self.convention_card is not None:
+            raise ValueError(
+                "Provide at most one of 'bidding_system' or 'convention_card', not both"
+            )
+        if self.bidding_system is not None:
+            self.bidding_system = validate_skill_slug(self.bidding_system)
 
         for tok in self.action_history:
             parse_action_token(tok)
@@ -425,6 +444,8 @@ class MatchRequest(BaseModel):
     opponent: Literal["baseline", "tenace"] = "baseline"
     team_a_profile: ModelProfile | None = None
     team_b_profile: ModelProfile | None = None
+    team_a_system: StrictStr | None = None
+    team_b_system: StrictStr | None = None
 
     @field_validator("boards", "seed", "dds_worlds", mode="before")
     @classmethod
@@ -437,7 +458,35 @@ class MatchRequest(BaseModel):
     def _validate_opponent_profile(self) -> MatchRequest:
         if self.opponent != "tenace" and self.team_b_profile is not None:
             raise ValueError("team_b_profile is only allowed when opponent='tenace'")
+        if self.opponent != "tenace" and self.team_b_system is not None:
+            raise ValueError("team_b_system is only allowed when opponent='tenace'")
+        if self.team_a_system is not None:
+            self.team_a_system = validate_skill_slug(self.team_a_system)
+        if self.team_b_system is not None:
+            self.team_b_system = validate_skill_slug(self.team_b_system)
         return self
+
+
+class SkillListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    default_system: str
+    skills: list[BiddingSkillMeta]
+
+
+class SkillDetailResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    version: str
+    description: str
+    nt_range: str | None = None
+    slam_control: str | None = None
+    opening_style: str | None = None
+    is_builtin: bool
+    summary_rules: str
+    detailed_rules: str
 
 
 class MatchResponse(BaseModel):
@@ -1121,11 +1170,25 @@ def _profile_cache_key(profile: ModelProfile) -> tuple[Any, ...]:
 def create_app(
     default_profile: ModelProfile | None = None,
     default_dds_worlds: int | None = None,
+    skill_registry: SkillRegistry | None = None,
+    default_system: str | None = None,
 ) -> FastAPI:
     """Create the stateless FastAPI service for Tenace on Google Cloud Run."""
     resolved_profile = (
         default_profile if default_profile is not None else default_profile_from_env()
     )
+    resolved_registry = (
+        skill_registry if skill_registry is not None else default_skill_registry()
+    )
+    raw_default_system = (
+        default_system
+        if default_system is not None
+        else default_bidding_system_from_env()
+    )
+    resolved_default_system = validate_skill_slug(raw_default_system)
+    # Fail fast at startup if the configured default bidding system does not exist.
+    resolved_registry.load(resolved_default_system, allow_file_path=False)
+
     if default_dds_worlds is None:
         resolved_dds_worlds = default_dds_worlds_from_env()
     else:
@@ -1181,6 +1244,20 @@ def create_app(
             headers={"Cache-Control": "no-cache"},
         )
 
+    def resolve_skill_or_http_error(
+        skill_id: str,
+        *,
+        is_caller_override: bool,
+    ) -> BiddingSkill:
+        try:
+            return resolved_registry.load(skill_id, allow_file_path=False)
+        except SkillNotFoundError as exc:
+            status_code = 404 if is_caller_override else 500
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+        except ValueError as exc:
+            status_code = 422 if is_caller_override else 500
+            raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
     @app.get("/health")
     @app.get("/healthz")
     async def health() -> dict[str, Any]:
@@ -1193,6 +1270,37 @@ def create_app(
             "dds_worlds": resolved_dds_worlds,
             "profile": resolved_profile.model_dump(mode="json"),
         }
+
+    @app.get("/v1/skills", response_model=SkillListResponse)
+    def list_skills_endpoint() -> SkillListResponse:
+        try:
+            skills = resolved_registry.list_skills()
+        except ValueError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        return SkillListResponse(
+            default_system=resolved_default_system,
+            skills=skills,
+        )
+
+    @app.get("/v1/skills/{skill_id}", response_model=SkillDetailResponse)
+    def get_skill_endpoint(skill_id: str) -> SkillDetailResponse:
+        try:
+            slug = validate_skill_slug(skill_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        skill = resolve_skill_or_http_error(slug, is_caller_override=True)
+        return SkillDetailResponse(
+            id=skill.meta.id,
+            name=skill.meta.name,
+            version=skill.meta.version,
+            description=skill.meta.description,
+            nt_range=skill.meta.nt_range,
+            slam_control=skill.meta.slam_control,
+            opening_style=skill.meta.opening_style,
+            is_builtin=skill.meta.is_builtin,
+            summary_rules=skill.summary_rules,
+            detailed_rules=skill.detailed_rules,
+        )
 
     @app.post("/v1/table/state", response_model=TableStateResponse)
     def table_state_endpoint(req: TableStateRequest) -> TableStateResponse:
@@ -1214,6 +1322,8 @@ def create_app(
         )
 
         if req.bot == "baseline":
+            if req.bidding_system is not None:
+                resolve_skill_or_http_error(req.bidding_system, is_caller_override=True)
             chosen_action = FirstLegalPassBaselineBot(observer).step(state)
             baseline_strategy = (
                 req.prior_strategy
@@ -1241,6 +1351,19 @@ def create_app(
             active_profile,
             is_caller_override=req.profile is not None,
         )
+        if req.convention_card is not None:
+            active_card = req.convention_card
+        elif req.bidding_system is not None:
+            active_card = resolve_skill_or_http_error(
+                req.bidding_system,
+                is_caller_override=True,
+            ).to_convention_card()
+        else:
+            active_card = resolve_skill_or_http_error(
+                resolved_default_system,
+                is_caller_override=False,
+            ).to_convention_card()
+
         agent = TenaceAgent(
             seat=observer,
             strategist_client=strategist_client,
@@ -1249,7 +1372,7 @@ def create_app(
                 num_worlds=active_dds_worlds,
                 rng_seed=req.seed,
             ),
-            convention_card=SAYC_CONVENTION_CARD,
+            convention_card=active_card,
         )
         if req.prior_strategy is not None:
             agent.strategy = req.prior_strategy
@@ -1294,6 +1417,14 @@ def create_app(
             is_caller_override=req.team_a_profile is not None,
         )
 
+        skill_a = resolve_skill_or_http_error(
+            req.team_a_system if req.team_a_system is not None else resolved_default_system,
+            is_caller_override=req.team_a_system is not None,
+        )
+        card_a = skill_a.to_convention_card()
+        team_a_system_label = f"{skill_a.meta.name} [{skill_a.meta.id}]"
+        team_b_system_label: str | None = None
+
         def team_a_factory(seat: Seat) -> BridgeSeatBot:
             return TenaceAgent(
                 seat=seat,
@@ -1303,13 +1434,23 @@ def create_app(
                     num_worlds=active_dds_worlds,
                     rng_seed=(req.seed * 31) + int(seat),
                 ),
-                convention_card=SAYC_CONVENTION_CARD,
+                convention_card=card_a,
             )
 
         if req.opponent == "tenace":
             profile_b = (
                 req.team_b_profile if req.team_b_profile is not None else profile_a
             )
+            skill_b = (
+                resolve_skill_or_http_error(
+                    req.team_b_system,
+                    is_caller_override=True,
+                )
+                if req.team_b_system is not None
+                else skill_a
+            )
+            card_b = skill_b.to_convention_card()
+            team_b_system_label = f"{skill_b.meta.name} [{skill_b.meta.id}]"
             team_a_name = "Tenace-A"
             team_b_name = "Tenace-B"
             team_b_profile_label: str | None = profile_b.short_label()
@@ -1327,7 +1468,7 @@ def create_app(
                         num_worlds=active_dds_worlds,
                         rng_seed=(req.seed * 37) + int(seat) + 100,
                     ),
-                    convention_card=SAYC_CONVENTION_CARD,
+                    convention_card=card_b,
                 )
         else:
             team_a_name = "Tenace"
@@ -1358,6 +1499,8 @@ def create_app(
             team_b_name=team_b_name,
             team_a_profile=profile_a.short_label(),
             team_b_profile=team_b_profile_label,
+            team_a_system=team_a_system_label,
+            team_b_system=team_b_system_label,
         )
 
         return MatchResponse(

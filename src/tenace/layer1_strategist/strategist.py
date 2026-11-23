@@ -205,21 +205,27 @@ class StrategistEngine:
         if facts.phase == "terminal":
             raise ValueError("Cannot plan on terminal board")
 
+        detailed_section = ""
+        if facts.phase == "auction" and self.convention_card.detailed_rules:
+            detailed_section = (
+                f"Detailed Reference Guide:\n{self.convention_card.detailed_rules}\n\n"
+            )
+
         system_prompt = (
             "You are Tenace Layer 1 Strategist, an expert Contract Bridge planner.\n"
             f"Partnership System: {self.convention_card.name}\n"
             f"Convention Summary: {self.convention_card.summary_rules}\n\n"
+            f"{detailed_section}"
             "Synthesize a coherent multi-trick or multi-round StrategyState based ONLY on "
             "legal public information and your own visible cards.\n"
             "During AUCTION: Start `plan_summary` by explicitly stating the single recommended call "
-            "for the LIVE turn (e.g., 'Bid 2NT...' or 'Raise to 4H...' or 'Pass...'). In an unopened "
-            "auction (1st/2nd seat), open sound 12+ HCP / Rule of 20 hands (2+ quick tricks) instead "
-            "of passing them out for a singleton honor or weak 5-card major. Always honor "
-            "forcing partnership bids (new-suit response over 1-level opening or weak-two, Stayman, "
-            "Jacoby transfers, cuebid limit raises, negative doubles) and never tell partner to pass a "
-            "1-level opening with 6+ HCP or drop a forcing bid. Factor in Duplicate IMP scoring and "
-            "vulnerability: push/accept close game invites (~24-25+ combined pts with a long suit or "
-            "good honors) especially when VULNERABLE (+500 game bonus only needs ~37% odds!).\n"
+            "for the LIVE turn (e.g., 'Bid 2NT...' or 'Raise to 4H...' or 'Pass...'). Follow the "
+            "exact Partnership System rules above for opening thresholds, artificial bids, weak/strong "
+            "openings, and slam/keycard asking responses — do NOT pass qualifying opening hands "
+            "merely for a singleton honor or weak suit. Always honor forcing partnership bids and "
+            "relays defined by the active system, and never drop a forcing call. Factor in Duplicate "
+            "IMP scoring and vulnerability: push/accept close game invites (~24-25+ combined pts with "
+            "a long suit or good honors) especially when VULNERABLE (+500 game bonus only needs ~37% odds!).\n"
             "Constraint syntax rules for `seat_constraints`:\n"
             "- Outer keys and inner `seat` values must use seat names: "
             '"NORTH", "EAST", "SOUTH", or "WEST".\n'

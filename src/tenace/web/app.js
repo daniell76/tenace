@@ -294,6 +294,9 @@
     serverHealth: null,
     serverProfile: null,
     serverDdsWorlds: 8,
+    defaultSystem: "sayc",
+    availableSkills: [],
+    skillDetailsCache: {},
 
     tableMode: "human_vs_tenace",
     boardNumber: 1,
@@ -383,6 +386,9 @@
     strategistModelInput: document.getElementById("strategist-model-input"),
     evaluatorBackendSelect: document.getElementById("evaluator-backend-select"),
     evaluatorModelInput: document.getElementById("evaluator-model-input"),
+    biddingSystemSelect: document.getElementById("bidding-system-select"),
+    biddingSkillDetails: document.getElementById("bidding-skill-details"),
+    biddingSkillPreview: document.getElementById("bidding-skill-preview"),
     resetProfileBtn: document.getElementById("reset-profile-btn"),
 
     hideEwThoughtsToggle: document.getElementById("hide-ew-thoughts-toggle"),
@@ -396,11 +402,13 @@
     labDoubleDummy: document.getElementById("lab-double-dummy"),
     labTeamAMode: document.getElementById("lab-team-a-mode"),
     labTeamABackend: document.getElementById("lab-team-a-backend"),
+    labTeamASystem: document.getElementById("lab-team-a-system"),
     labTeamAStrategist: document.getElementById("lab-team-a-strategist"),
     labTeamAEvaluator: document.getElementById("lab-team-a-evaluator"),
     labTeamBFieldset: document.getElementById("lab-team-b-fieldset"),
     labTeamBMode: document.getElementById("lab-team-b-mode"),
     labTeamBBackend: document.getElementById("lab-team-b-backend"),
+    labTeamBSystem: document.getElementById("lab-team-b-system"),
     labTeamBStrategist: document.getElementById("lab-team-b-strategist"),
     labTeamBEvaluator: document.getElementById("lab-team-b-evaluator"),
     labRunBtn: document.getElementById("lab-run-btn"),
@@ -464,6 +472,82 @@
       teamBBackend === "gemini" && prof.evaluator_model !== "gemini-4-argon"
         ? "gemini-4-argon"
         : defaultEvaluatorModelForBackend(teamBBackend, prof);
+
+    const defSys = state.defaultSystem || "sayc";
+    if (dom.biddingSystemSelect) {
+      dom.biddingSystemSelect.value = defSys;
+    }
+    if (dom.labTeamASystem) {
+      dom.labTeamASystem.value = defSys;
+    }
+    if (dom.labTeamBSystem) {
+      dom.labTeamBSystem.value = defSys;
+    }
+  }
+
+  function populateSkillSelect(selectEl, skills, preferredValue) {
+    if (!selectEl || !Array.isArray(skills) || skills.length === 0) {
+      return;
+    }
+    const previous = preferredValue || selectEl.value || state.defaultSystem || "sayc";
+    selectEl.innerHTML = skills
+      .map((skill) => {
+        const ntBadge = skill.nt_range ? ` (${skill.nt_range} NT)` : "";
+        const sourceTag = skill.is_builtin ? "" : " [external]";
+        return `<option value="${escapeHtml(skill.id)}">${escapeHtml(skill.name)}${escapeHtml(ntBadge)}${escapeHtml(sourceTag)}</option>`;
+      })
+      .join("");
+    const hasPrevious = skills.some((s) => s.id === previous);
+    selectEl.value = hasPrevious ? previous : skills[0].id;
+  }
+
+  async function loadSkillsIndex() {
+    try {
+      const resp = await fetchJson("/v1/skills");
+      const skills = Array.isArray(resp && resp.skills) ? resp.skills : [];
+      if (resp && typeof resp.default_system === "string" && resp.default_system.trim()) {
+        state.defaultSystem = resp.default_system.trim();
+      }
+      state.availableSkills = skills;
+      populateSkillSelect(dom.biddingSystemSelect, skills, state.defaultSystem);
+      populateSkillSelect(dom.labTeamASystem, skills, state.defaultSystem);
+      populateSkillSelect(dom.labTeamBSystem, skills, state.defaultSystem);
+    } catch (_err) {
+      // Non-fatal: retain static SAYC fallback option.
+    }
+  }
+
+  async function renderSkillPreview(skillId) {
+    if (!dom.biddingSkillPreview || !skillId) {
+      return;
+    }
+    const cached = state.skillDetailsCache[skillId];
+    const renderDetail = (detail) => {
+      const metaParts = [
+        `id: ${detail.id}`,
+        `v${detail.version || "1.0"}`,
+        detail.nt_range ? `1NT: ${detail.nt_range}` : null,
+        detail.is_builtin ? "built-in" : "external",
+      ].filter(Boolean);
+      const refHtml = detail.detailed_rules
+        ? `\n\n--- Reference Guide ---\n${escapeHtml(detail.detailed_rules)}`
+        : "";
+      dom.biddingSkillPreview.innerHTML =
+        `<div class="skill-preview-meta">${escapeHtml(metaParts.join(" · "))}</div>` +
+        `<div>${escapeHtml(detail.summary_rules)}${refHtml}</div>`;
+    };
+    if (cached) {
+      renderDetail(cached);
+      return;
+    }
+    dom.biddingSkillPreview.textContent = `Loading ${skillId} rules…`;
+    try {
+      const detail = await fetchJson(`/v1/skills/${encodeURIComponent(skillId)}`);
+      state.skillDetailsCache[skillId] = detail;
+      renderDetail(detail);
+    } catch (err) {
+      dom.biddingSkillPreview.textContent = `Unable to load rules for ${skillId}: ${err.message}`;
+    }
   }
 
   async function fetchJson(url, options = {}) {
@@ -765,7 +849,9 @@
     if (!ts) {
       return;
     }
-    dom.auctionDealerNote.textContent = `Dealer: ${ts.dealer}`;
+    const activeSys =
+      (dom.biddingSystemSelect && dom.biddingSystemSelect.value) || state.defaultSystem || "sayc";
+    dom.auctionDealerNote.textContent = `Dealer: ${ts.dealer} · ${activeSys.toUpperCase()}`;
     const rows = buildAuctionRows(ts.dealer, ts.auction_calls || []);
 
     const bodyRowsHtml =
@@ -1292,6 +1378,13 @@
     if (profileOverride) {
       requestBody.profile = profileOverride;
     }
+    const selectedSystem =
+      dom.biddingSystemSelect && typeof dom.biddingSystemSelect.value === "string"
+        ? dom.biddingSystemSelect.value.trim()
+        : "";
+    if (bot === "tenace" && selectedSystem) {
+      requestBody.bidding_system = selectedSystem;
+    }
 
     const controller = new AbortController();
     state.activeAbortController = controller;
@@ -1551,6 +1644,13 @@
     if (teamAOverride) {
       payload.team_a_profile = teamAOverride;
     }
+    const teamASystem =
+      dom.labTeamASystem && typeof dom.labTeamASystem.value === "string"
+        ? dom.labTeamASystem.value.trim()
+        : "";
+    if (teamASystem) {
+      payload.team_a_system = teamASystem;
+    }
     if (opponent === "tenace") {
       payload.team_b_profile = buildProfilePayload(
         {
@@ -1562,6 +1662,13 @@
         state.serverProfile,
         true
       );
+      const teamBSystem =
+        dom.labTeamBSystem && typeof dom.labTeamBSystem.value === "string"
+          ? dom.labTeamBSystem.value.trim()
+          : "";
+      if (teamBSystem) {
+        payload.team_b_system = teamBSystem;
+      }
     }
 
     state.isLabBusy = true;
@@ -1782,7 +1889,29 @@
 
     dom.resetProfileBtn.addEventListener("click", () => {
       applyServerDefaultsToForms();
+      if (dom.biddingSkillDetails && dom.biddingSkillDetails.open) {
+        renderSkillPreview(dom.biddingSystemSelect.value);
+      }
+      renderAll();
     });
+
+    if (dom.biddingSystemSelect) {
+      dom.biddingSystemSelect.addEventListener("change", () => {
+        state.priorStrategies = { NORTH: null, EAST: null, SOUTH: null, WEST: null };
+        if (dom.biddingSkillDetails && dom.biddingSkillDetails.open) {
+          renderSkillPreview(dom.biddingSystemSelect.value);
+        }
+        renderAll();
+      });
+    }
+
+    if (dom.biddingSkillDetails) {
+      dom.biddingSkillDetails.addEventListener("toggle", () => {
+        if (dom.biddingSkillDetails.open && dom.biddingSystemSelect) {
+          renderSkillPreview(dom.biddingSystemSelect.value);
+        }
+      });
+    }
 
     dom.hideEwThoughtsToggle.addEventListener("change", () => {
       state.hideEwThoughts = Boolean(dom.hideEwThoughtsToggle.checked);
@@ -1813,6 +1942,7 @@
       showError(`Could not reach /health: ${err.message}`);
     }
 
+    await loadSkillsIndex();
     await startNewDeal({ boardNumber: 1, seed: 42 });
   }
 

@@ -299,6 +299,20 @@
                     value="gemini-3.8-flash"
                   />
                 </div>
+
+                <div class="panel-field is-full">
+                  <label for="bidding-system-select">Bidding System Skill (SKILL.md)</label>
+                  <select id="bidding-system-select">
+                    <option value="sayc">SAYC (Standard American Yellow Card)</option>
+                  </select>
+                </div>
+
+                <details id="bidding-skill-details" class="skill-preview-details panel-field is-full">
+                  <summary id="bidding-skill-summary">Inspect Active Bidding Rules</summary>
+                  <div id="bidding-skill-preview" class="skill-preview-body">
+                    Expand to load dynamic convention card summary and reference guide.
+                  </div>
+                </details>
               </div>
             </div>
 
@@ -395,6 +409,12 @@
                   />
                 </div>
                 <div class="panel-field is-full">
+                  <label for="lab-team-a-system">Bidding System</label>
+                  <select id="lab-team-a-system">
+                    <option value="sayc">SAYC (Standard American Yellow Card)</option>
+                  </select>
+                </div>
+                <div class="panel-field is-full">
                   <label for="lab-team-a-evaluator">L2 Evaluator Model</label>
                   <input
                     type="text"
@@ -432,6 +452,12 @@
                     list="strategist-models-datalist"
                     value="gemini-3.8-flash"
                   />
+                </div>
+                <div class="panel-field is-full">
+                  <label for="lab-team-b-system">Bidding System</label>
+                  <select id="lab-team-b-system">
+                    <option value="sayc">SAYC (Standard American Yellow Card)</option>
+                  </select>
                 </div>
                 <div class="panel-field is-full">
                   <label for="lab-team-b-evaluator">L2 Evaluator Model</label>

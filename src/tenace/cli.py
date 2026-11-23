@@ -25,13 +25,17 @@ from tenace.harness import (
     RoomTranscript,
     SubprocessTcpBlueChipController,
 )
-from tenace.layer1_strategist import SAYC_CONVENTION_CARD
 from tenace.layer3_rules import RuleDDSEvaluator
 from tenace.models.clients import (
     DiffusionGemmaClient,
     GeminiDecisionsClient,
     StructuredModelClient,
     VertexGeminiClient,
+)
+from tenace.skills import (
+    BiddingSkillMeta,
+    default_bidding_system_from_env,
+    default_skill_registry,
 )
 
 T = TypeVar("T", bound=BaseModel)
@@ -50,6 +54,7 @@ _OPPONENT_TENACE_FLAGS: tuple[tuple[str, str], ...] = (
     ("opponent_evaluator_endpoint_id", "--opponent-evaluator-endpoint-id"),
     ("opponent_decisions_auth", "--opponent-decisions-auth"),
     ("opponent_decisions_violation_threshold", "--opponent-decisions-violation-threshold"),
+    ("opponent_system", "--opponent-system"),
 )
 
 _HCP_RE = re.compile(r"Own Hand\s*\((\d+)\s*HCP\)", re.IGNORECASE)
@@ -70,6 +75,7 @@ __all__ = [
     "build_arg_parser",
     "build_clients_for_profile",
     "format_match_report",
+    "format_skills_table",
     "main",
     "resolve_model_profiles",
     "run_cli",
@@ -572,11 +578,42 @@ def build_arg_parser(env: Mapping[str, str] | None = None) -> argparse.ArgumentP
             "(default: $TENACE_DDS_WORLDS or 16)."
         ),
     )
+    default_bidding_system = default_bidding_system_from_env(mapping)
+
     parser.add_argument(
         "--double-dummy",
         action="store_true",
         default=False,
         help="Skip card play and score auction contracts directly via OpenSpiel double-dummy.",
+    )
+    parser.add_argument(
+        "--skills-dir",
+        action="append",
+        default=None,
+        metavar="DIR",
+        help=(
+            "Additional directory containing bidding-system <id>/SKILL.md files "
+            "(repeatable; layers on top of $TENACE_SKILLS_DIR and built-in skills)."
+        ),
+    )
+    parser.add_argument(
+        "--system",
+        default=default_bidding_system,
+        help=(
+            "Bidding system skill ID or local SKILL.md path for Tenace "
+            "(default: $TENACE_BIDDING_SYSTEM or 'sayc')."
+        ),
+    )
+    parser.add_argument(
+        "--opponent-system",
+        default=None,
+        help="Override bidding system skill ID or SKILL.md path for Team B (--opponent tenace).",
+    )
+    parser.add_argument(
+        "--list-systems",
+        action="store_true",
+        default=False,
+        help="List all discovered bidding-system skills and exit.",
     )
     return parser
 
@@ -770,12 +807,37 @@ def _format_room_section(
         lines.append("      (none)")
 
 
+def format_skills_table(skills: list[BiddingSkillMeta]) -> str:
+    """Format discovered bidding-system skills as a concise aligned terminal table."""
+    if not skills:
+        return "No bidding-system skills found."
+    id_w = max(len("ID"), *(len(s.id) for s in skills))
+    src_w = len("external")
+    nt_w = max(len("1NT"), *(len(s.nt_range or "-") for s in skills))
+    name_w = max(len("NAME"), *(len(s.name) for s in skills))
+    header = (
+        f"{'ID':<{id_w}}  {'SOURCE':<{src_w}}  {'1NT':<{nt_w}}  "
+        f"{'NAME':<{name_w}}  DESCRIPTION"
+    )
+    lines = [header, "-" * len(header)]
+    for skill in skills:
+        source_lbl = "built-in" if skill.is_builtin else "external"
+        nt_lbl = skill.nt_range or "-"
+        lines.append(
+            f"{skill.id:<{id_w}}  {source_lbl:<{src_w}}  {nt_lbl:<{nt_w}}  "
+            f"{skill.name:<{name_w}}  {skill.description}"
+        )
+    return "\n".join(lines)
+
+
 def format_match_report(
     summary: MatchSummary,
     team_a_name: str = "Tenace",
     team_b_name: str = "Opponent",
     team_a_profile: str | None = None,
     team_b_profile: str | None = None,
+    team_a_system: str | None = None,
+    team_b_system: str | None = None,
 ) -> str:
     ruler = "=" * 76
     sub_ruler = "-" * 76
@@ -786,8 +848,12 @@ def format_match_report(
     ]
     if team_a_profile is not None:
         lines.append(f"Team A  : {team_a_name} ({team_a_profile})")
+    if team_a_system is not None:
+        lines.append(f"System A: {team_a_system}")
     if team_b_profile is not None:
         lines.append(f"Team B  : {team_b_name} ({team_b_profile})")
+    if team_b_system is not None:
+        lines.append(f"System B: {team_b_system}")
     lines.extend(
         [
             f"Boards  : {len(summary.boards)}  |  Tournament Seed: {summary.tournament_seed}",
@@ -866,6 +932,11 @@ def run_cli(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
 
+    registry = default_skill_registry(extra_dirs=args.skills_dir)
+    if args.list_systems:
+        print(format_skills_table(registry.list_skills()))
+        return 0
+
     if args.boards < 1:
         raise ValueError("--boards must be >= 1")
     if args.dds_worlds < 1:
@@ -885,6 +956,9 @@ def run_cli(argv: list[str] | None = None) -> int:
             )
 
     team_a_profile, team_b_profile = resolve_model_profiles(args)
+    team_a_skill = registry.load(args.system, allow_file_path=True)
+    team_a_card = team_a_skill.to_convention_card()
+    team_a_system_label = f"{team_a_skill.meta.name} [{team_a_skill.meta.id}]"
     strategist_client, evaluator_client = build_clients_for_profile(team_a_profile)
 
     def team_a_factory(seat: Seat) -> BridgeSeatBot:
@@ -896,17 +970,25 @@ def run_cli(argv: list[str] | None = None) -> int:
                 num_worlds=args.dds_worlds,
                 rng_seed=(args.seed * 31) + int(seat),
             ),
-            convention_card=SAYC_CONVENTION_CARD,
+            convention_card=team_a_card,
         )
 
     team_a_name = "Tenace"
     team_b_profile_label: str | None = None
+    team_b_system_label: str | None = None
 
     if args.opponent == "tenace":
         assert team_b_profile is not None
         team_a_name = "Tenace-A"
         team_b_name = "Tenace-B"
         team_b_profile_label = team_b_profile.short_label()
+        team_b_skill = (
+            registry.load(args.opponent_system, allow_file_path=True)
+            if args.opponent_system is not None
+            else team_a_skill
+        )
+        team_b_card = team_b_skill.to_convention_card()
+        team_b_system_label = f"{team_b_skill.meta.name} [{team_b_skill.meta.id}]"
         opp_strategist_client, opp_evaluator_client = build_clients_for_profile(team_b_profile)
 
         def team_b_factory(seat: Seat) -> BridgeSeatBot:
@@ -918,7 +1000,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                     num_worlds=args.dds_worlds,
                     rng_seed=(args.seed * 37) + int(seat) + 100,
                 ),
-                convention_card=SAYC_CONVENTION_CARD,
+                convention_card=team_b_card,
             )
     elif args.opponent == "bluechip":
         team_b_name = "BlueChip"
@@ -957,6 +1039,8 @@ def run_cli(argv: list[str] | None = None) -> int:
             team_b_name=team_b_name,
             team_a_profile=team_a_profile.short_label(),
             team_b_profile=team_b_profile_label,
+            team_a_system=team_a_system_label,
+            team_b_system=team_b_system_label,
         )
     )
     return 0
