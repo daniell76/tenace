@@ -135,3 +135,60 @@ def test_domain_package_reexports():
     assert domain.Suit is Suit
     assert domain.StrategyState is not None
     assert "StrategyState" in domain.__all__
+
+
+def test_seat_constraint_coerces_bridge_card_strings_in_likely_cards():
+    from tenace.domain.types import StrategyState
+
+    # Exact payload style observed from live gemini-4-argon on seed=100 & seed=200!
+    sc_colon = SeatConstraint.model_validate(
+        {
+            "seat": "NORTH",
+            "min_hcp": 10,
+            "max_hcp": 14,
+            "likely_cards": ["D:K", "H:A", "C:T", "S:10", "C:2"],
+        }
+    )
+    assert sc_colon.likely_cards == [
+        card_id(Suit.DIAMONDS, 11),
+        card_id(Suit.HEARTS, 12),
+        card_id(Suit.CLUBS, 8),
+        card_id(Suit.SPADES, 8),
+        card_id(Suit.CLUBS, 0),
+    ]
+
+    sc_compact = SeatConstraint.model_validate(
+        {
+            "seat": "EAST",
+            "likely_cards": ["DK", "CK", "CQ", "SK", "HQ", "HJ", "HT", "10D", "♠A", "♣2", 51],
+        }
+    )
+    assert sc_compact.likely_cards == [
+        card_id(Suit.DIAMONDS, 11),
+        card_id(Suit.CLUBS, 11),
+        card_id(Suit.CLUBS, 10),
+        card_id(Suit.SPADES, 11),
+        card_id(Suit.HEARTS, 10),
+        card_id(Suit.HEARTS, 9),
+        card_id(Suit.HEARTS, 8),
+        card_id(Suit.DIAMONDS, 8),
+        card_id(Suit.SPADES, 12),
+        card_id(Suit.CLUBS, 0),
+        51,
+    ]
+
+    # StrategyState full JSON validation accepts string card hints cleanly
+    st = StrategyState.model_validate_json(
+        '{"phase":"play","plan_summary":"Duck once","seat_constraints":'
+        '{"WEST":{"min_hcp":12,"max_hcp":16,"likely_cards":["D:K","SA","♥Q"]}}}'
+    )
+    assert st.seat_constraints[Seat.WEST].likely_cards == [
+        card_id(Suit.DIAMONDS, 11),
+        card_id(Suit.SPADES, 12),
+        card_id(Suit.HEARTS, 10),
+    ]
+
+    # Invalid card strings and out-of-range integers must still be rejected
+    for bad in ([52], [-1], ["XY"], ["D:15"], ["not_a_card"]):
+        with pytest.raises(ValidationError):
+            SeatConstraint.model_validate({"seat": "NORTH", "likely_cards": bad})

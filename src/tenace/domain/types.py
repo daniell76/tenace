@@ -165,6 +165,39 @@ def _coerce_suit_value(value: Any) -> Any:
     return value
 
 
+_UNICODE_SUIT_MAP: dict[str, str] = {
+    "♣": "C",
+    "♦": "D",
+    "♥": "H",
+    "♠": "S",
+}
+_SUIT_CHAR_TO_ENUM: dict[str, Suit] = {
+    "C": Suit.CLUBS,
+    "D": Suit.DIAMONDS,
+    "H": Suit.HEARTS,
+    "S": Suit.SPADES,
+}
+_RANK_CHAR_TO_INDEX: dict[str, int] = {ch: idx for idx, ch in enumerate(RANK_CHARS)}
+
+
+def _coerce_card_id(value: Any) -> Any:
+    """Parse canonical bridge card labels ('D:K', 'DK', 'KD', '10D', '♠A') to OpenSpiel int [0, 51]."""
+    if not isinstance(value, str):
+        return value
+    raw = value.strip()
+    for sym, ascii_suit in _UNICODE_SUIT_MAP.items():
+        raw = raw.replace(sym, ascii_suit)
+    cleaned = raw.replace(":", "").replace(" ", "").upper().replace("10", "T")
+    if len(cleaned) != 2:
+        return value
+    a, b = cleaned[0], cleaned[1]
+    if a in _SUIT_CHAR_TO_ENUM and b in _RANK_CHAR_TO_INDEX:
+        return card_id(_SUIT_CHAR_TO_ENUM[a], _RANK_CHAR_TO_INDEX[b])
+    if b in _SUIT_CHAR_TO_ENUM and a in _RANK_CHAR_TO_INDEX:
+        return card_id(_SUIT_CHAR_TO_ENUM[b], _RANK_CHAR_TO_INDEX[a])
+    return value
+
+
 class SeatConstraint(BaseModel):
     seat: Seat
     min_hcp: int = Field(default=0, ge=0, le=37)
@@ -187,6 +220,13 @@ class SeatConstraint(BaseModel):
                 normalized[dict_field] = {
                     _coerce_suit_value(k): v for k, v in raw_map.items()
                 }
+            elif raw_map is None and dict_field in normalized:
+                normalized[dict_field] = {}
+        raw_likely = normalized.get("likely_cards")
+        if isinstance(raw_likely, list):
+            normalized["likely_cards"] = [_coerce_card_id(item) for item in raw_likely]
+        elif raw_likely is None and "likely_cards" in normalized:
+            normalized["likely_cards"] = []
         return normalized
 
     @model_validator(mode="after")

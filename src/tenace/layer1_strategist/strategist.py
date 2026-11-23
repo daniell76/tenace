@@ -196,6 +196,7 @@ class StrategistEngine:
             '"NORTH", "EAST", "SOUTH", or "WEST".\n'
             "- Suit keys in `min_suit_lengths` and `max_suit_lengths` must use suit names: "
             '"CLUBS", "DIAMONDS", "HEARTS", or "SPADES".\n'
+            "- `likely_cards` accepts canonical card strings like \"S:A\" or \"H:K\" (or omit/empty list `[]`).\n"
             "- Ensure `min_hcp <= max_hcp` (0..37) and `min_suit_lengths[s] <= max_suit_lengths[s]` (0..13)."
         )
 
