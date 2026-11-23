@@ -28,6 +28,7 @@ __all__ = [
     "format_contract_summary",
     "format_known_voids",
     "format_play_state",
+    "format_vulnerability",
 ]
 
 _SUIT_DISPLAY_ORDER = (Suit.SPADES, Suit.HEARTS, Suit.DIAMONDS, Suit.CLUBS)
@@ -86,6 +87,25 @@ def format_known_voids(known_voids: dict[Seat, set[Suit]]) -> str:
             suit_names = ", ".join(s.name for s in voids)
             entries.append(f"{seat.name}: [{suit_names}]")
     return "; ".join(entries) if entries else "(none)"
+
+
+def format_vulnerability(facts: BoardFactSnapshot) -> str:
+    """Return side-relative vulnerability & Duplicate IMP scoring header."""
+    ns_v, ew_v = facts.ns_vulnerable, facts.ew_vulnerable
+    if ns_v and ew_v:
+        label = "Both (All)"
+    elif ns_v:
+        label = "N/S only"
+    elif ew_v:
+        label = "E/W only"
+    else:
+        label = "None (Neither)"
+    obs_is_ns = facts.observer.partnership == 0
+    us_vul = ns_v if obs_is_ns else ew_v
+    them_vul = ew_v if obs_is_ns else ns_v
+    us_str = "VULNERABLE" if us_vul else "Non-vul"
+    them_str = "VULNERABLE" if them_vul else "Non-vul"
+    return f"Scoring: Duplicate IMPs | Vul: {label} (Us: {us_str}, Opponents: {them_str})"
 
 
 def format_play_state(facts: BoardFactSnapshot) -> tuple[str, str, str]:
@@ -195,7 +215,9 @@ class StrategistEngine:
             "for the LIVE turn (e.g., 'Bid 2NT...' or 'Raise to 4H...' or 'Pass...'). Always honor "
             "forcing partnership bids (new-suit response over 1-level opening or weak-two, Stayman, "
             "Jacoby transfers, cuebid limit raises, negative doubles) and never tell partner to pass a "
-            "1-level opening with 6+ HCP or drop a forcing bid.\n"
+            "1-level opening with 6+ HCP or drop a forcing bid. Factor in Duplicate IMP scoring and "
+            "vulnerability: push/accept close game invites (~24-25+ combined pts with a long suit or "
+            "good honors) especially when VULNERABLE (+500 game bonus only needs ~37% odds!).\n"
             "Constraint syntax rules for `seat_constraints`:\n"
             "- Outer keys and inner `seat` values must use seat names: "
             '"NORTH", "EAST", "SOUTH", or "WEST".\n'
@@ -226,6 +248,7 @@ class StrategistEngine:
         lines = [
             f"Seat: {facts.observer.name} (Partner: {facts.observer.partner.name})",
             f"Phase: {facts.phase}",
+            format_vulnerability(facts),
             f"Own Hand ({facts.own_hcp} HCP): {format_cards_by_suit(facts.own_cards)}",
             f"Dummy: {dummy_line}",
         ]

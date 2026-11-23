@@ -9,6 +9,7 @@ from tenace.layer1_strategist.strategist import (
     format_contract_summary,
     format_known_voids,
     format_play_state,
+    format_vulnerability,
 )
 
 __all__ = [
@@ -20,4 +21,5 @@ __all__ = [
     "format_contract_summary",
     "format_known_voids",
     "format_play_state",
+    "format_vulnerability",
 ]

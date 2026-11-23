@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import re
 from typing import Literal
 
 import pyspiel
@@ -33,6 +34,7 @@ __all__ = [
 _PLAY_OWN_SLICE = slice(25, 25 + NUM_CARDS)
 _PLAY_DUMMY_SLICE = slice(25 + NUM_CARDS, 25 + 2 * NUM_CARDS)
 _AUCTION_OWN_SLICE = slice(432, 432 + NUM_CARDS)
+_OBS_VUL_RE = re.compile(r"^Vul:\s*(None|N/S|E/W|All)\s*$", re.MULTILINE)
 
 
 def collapse_equivalent_actions(
@@ -113,6 +115,8 @@ class BoardFactSnapshot(BaseModel):
     declarer: Seat | None = None
     trump_denom: int | None = Field(default=None, ge=0, le=4)
     contract_level: int = Field(default=0, ge=0, le=7)
+    ns_vulnerable: bool = False
+    ew_vulnerable: bool = False
     known_voids: dict[Seat, set[Suit]] = Field(default_factory=dict)
     surprise_events: list[str] = Field(default_factory=list)
 
@@ -232,6 +236,12 @@ class RuleFactTracker:
         visible_or_played = set(own_cards) | set(dummy_cards) | set(play_actions)
         unseen_cards = [c for c in range(NUM_CARDS) if c not in visible_or_played]
 
+        obs_str = state.observation_string(int(observer))
+        m_vul = _OBS_VUL_RE.search(obs_str)
+        vul_tok = m_vul.group(1) if m_vul is not None else "None"
+        ns_vul = vul_tok in ("N/S", "All")
+        ew_vul = vul_tok in ("E/W", "All")
+
         return BoardFactSnapshot(
             observer=observer,
             phase=phase,
@@ -245,6 +255,8 @@ class RuleFactTracker:
             declarer=declarer,
             trump_denom=trump_denom,
             contract_level=contract_level,
+            ns_vulnerable=ns_vul,
+            ew_vulnerable=ew_vul,
             known_voids=known_voids,
             surprise_events=surprise_events,
         )

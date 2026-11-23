@@ -384,3 +384,29 @@ def test_tracker_rejects_incomplete_deal_phase_and_snapshot_validates_bounds():
             own_hcp=0,
             auction_calls=[(Seat.NORTH, -1)],
         )
+
+
+def test_tracker_extracts_vulnerability_from_public_observation_string():
+    cases = [
+        (False, False, False, False),
+        (True, False, True, False),
+        (False, True, False, True),
+        (True, True, True, True),
+    ]
+    tracker = RuleFactTracker()
+    for dealer_vul, non_dealer_vul, exp_ns, exp_ew in cases:
+        game = pyspiel.load_game(
+            "bridge",
+            {
+                "dealer": 0,  # NORTH -> NS is dealer partnership
+                "dealer_vul": dealer_vul,
+                "non_dealer_vul": non_dealer_vul,
+                "use_double_dummy_result": False,
+            },
+        )
+        state = game.new_initial_state()
+        for c in range(52):
+            state.apply_action(c)
+        snap = tracker.extract_facts(state, Seat.EAST)
+        assert snap.ns_vulnerable is exp_ns
+        assert snap.ew_vulnerable is exp_ew

@@ -15,6 +15,7 @@ from tenace.layer1_strategist import (
     format_contract_summary,
     format_known_voids,
     format_play_state,
+    format_vulnerability,
 )
 from tenace.layer3_rules.tracker import BoardFactSnapshot
 from tenace.models.clients import StructuredModelClient
@@ -96,6 +97,7 @@ class TacticalOptionEvaluator:
         user_lines = [
             "=== Board Facts ===",
             f"Observer: {facts.observer.name} | Phase: {facts.phase}",
+            format_vulnerability(facts),
         ]
         if facts.phase == "play":
             is_dummy_turn = (
