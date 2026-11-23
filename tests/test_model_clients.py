@@ -1036,3 +1036,37 @@ def test_gemini_decisions_client_rejects_duplicate_candidate_labels_before_api_c
 
 
 
+
+
+def test_vertex_gemini_client_retries_on_malformed_json_or_validation_error():
+    responses = [
+        SimpleNamespace(text="I recommend passing with this hand."),  # prose, no JSON!
+        SimpleNamespace(text='{"phase": "play"}'),  # missing plan_summary -> ValidationError
+        SimpleNamespace(
+            text='{"phase": "play", "plan_summary": "Lead heart Ace", "revision": 1}'
+        ),
+    ]
+    seen_contents: list[str] = []
+
+    def fake_generate_content(**kwargs):
+        seen_contents.append(kwargs["contents"])
+        return responses.pop(0)
+
+    fake_genai = SimpleNamespace(models=SimpleNamespace(generate_content=fake_generate_content))
+    client = VertexGeminiClient(genai_client=fake_genai, max_parse_retries=2)
+    result = client.generate_structured("sys", "user prompt", StrategyState)
+    assert result.plan_summary == "Lead heart Ace"
+    assert len(seen_contents) == 3
+    assert "No valid JSON" in seen_contents[1]
+    assert "plan_summary" in seen_contents[2]
+
+    # When retries are exhausted, re-raise last parse error cleanly
+    bad_genai = SimpleNamespace(
+        models=SimpleNamespace(generate_content=lambda **_: SimpleNamespace(text="not json"))
+    )
+    client_no_retry = VertexGeminiClient(genai_client=bad_genai, max_parse_retries=0)
+    with pytest.raises(ValueError, match="No valid JSON object"):
+        client_no_retry.generate_structured("sys", "user", StrategyState)
+
+    with pytest.raises(ValueError, match="max_parse_retries"):
+        VertexGeminiClient(genai_client=bad_genai, max_parse_retries=-1)

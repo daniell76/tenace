@@ -263,10 +263,17 @@ class StrategyState(BaseModel):
     def _normalize_seat_constraint_keys(cls, data: Any) -> Any:
         if not isinstance(data, dict):
             return data
-        raw_constraints = data.get("seat_constraints")
-        if not isinstance(raw_constraints, dict):
-            return data
         normalized = dict(data)
+        if "target_or_threat" in normalized and normalized["target_or_threat"] is None:
+            normalized["target_or_threat"] = ""
+        if "assumptions" in normalized and normalized["assumptions"] is None:
+            normalized["assumptions"] = []
+        raw_constraints = normalized.get("seat_constraints")
+        if raw_constraints is None and "seat_constraints" in normalized:
+            normalized["seat_constraints"] = {}
+            return normalized
+        if not isinstance(raw_constraints, dict):
+            return normalized
         coerced_constraints: dict[Any, Any] = {}
         for key, constraint in raw_constraints.items():
             coerced_key = _coerce_seat_value(key)

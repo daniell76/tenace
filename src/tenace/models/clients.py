@@ -136,6 +136,7 @@ class VertexGeminiClient:
         temperature: float = 0.2,
         thinking_level: Literal["MINIMAL", "LOW", "MEDIUM", "HIGH"] | None = None,
         thinking_budget: int | None = None,
+        max_parse_retries: int = 2,
         genai_client: Any | None = None,
     ) -> None:
         cleaned_project = _clean_optional_str(project, "project")
@@ -158,6 +159,14 @@ class VertexGeminiClient:
         if thinking_budget is not None:
             if isinstance(thinking_budget, bool) or not isinstance(thinking_budget, int) or thinking_budget < 0:
                 raise ValueError(f"thinking_budget must be an integer >= 0, got {thinking_budget!r}")
+        if (
+            isinstance(max_parse_retries, bool)
+            or not isinstance(max_parse_retries, int)
+            or max_parse_retries < 0
+        ):
+            raise ValueError(
+                f"max_parse_retries must be an integer >= 0, got {max_parse_retries!r}"
+            )
 
         self.project = cleaned_project
         self.location = cleaned_location
@@ -165,6 +174,7 @@ class VertexGeminiClient:
         self.temperature = float(temperature)
         self.thinking_level = thinking_level
         self.thinking_budget = thinking_budget
+        self.max_parse_retries = max_parse_retries
         self._client = (
             genai_client
             if genai_client is not None
@@ -187,21 +197,40 @@ class VertexGeminiClient:
         elif self.thinking_budget is not None:
             thinking_cfg = genai_types.ThinkingConfig(thinking_budget=self.thinking_budget)
 
-        prompt_with_schema = f"{user_prompt.strip()}\n\n{_format_schema_instruction(schema)}"
-        resp = self._client.models.generate_content(
-            model=self.model,
-            contents=prompt_with_schema,
-            config=genai_types.GenerateContentConfig(
-                system_instruction=system_prompt,
-                temperature=self.temperature,
-                thinking_config=thinking_cfg,
-                response_mime_type="application/json",
-            ),
-        )
-        text = getattr(resp, "text", None)
-        if not isinstance(text, str) or not text.strip():
-            raise ValueError("Empty response from Vertex Gemini model")
-        return extract_json_object(text, schema)
+        base_prompt = f"{user_prompt.strip()}\n\n{_format_schema_instruction(schema)}"
+        current_prompt = base_prompt
+        last_error: Exception | None = None
+        for attempt in range(self.max_parse_retries + 1):
+            resp = self._client.models.generate_content(
+                model=self.model,
+                contents=current_prompt,
+                config=genai_types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    temperature=self.temperature,
+                    thinking_config=thinking_cfg,
+                    response_mime_type="application/json",
+                ),
+            )
+            text = getattr(resp, "text", None)
+            try:
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("Empty response from Vertex Gemini model")
+                return extract_json_object(text, schema)
+            except (ValueError, ValidationError) as exc:
+                last_error = exc
+                if attempt >= self.max_parse_retries:
+                    raise
+                err_brief = " | ".join(
+                    line.strip() for line in str(exc).splitlines() if line.strip()
+                )[:240]
+                current_prompt = (
+                    f"{base_prompt}\n\n"
+                    f"IMPORTANT CORRECTION: Your previous output could not be parsed ({err_brief}). "
+                    "Return ONLY a single complete, valid JSON object matching the schema with "
+                    "no markdown prose or truncated fields."
+                )
+        assert last_error is not None
+        raise last_error
 
 
 class DiffusionSamplingConfig(BaseModel):
