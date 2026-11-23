@@ -38,11 +38,11 @@ _DECISION_SCORE_CRITERIA: tuple[str, ...] = (
 )
 
 _AUCTION_SCORE_CRITERIA: tuple[str, ...] = (
-    "0 - Reckless/terrible call (massive overbid, slam without values/aces, or undisciplined double).",
-    "1 - Poor call violating bidding-system strength or shape range, or misleading partner.",
+    "0 - Reckless/terrible call (massive overbid, unverified blind slam jump without Ace/keycard check, or undisciplined double).",
+    "1 - Poor call violating bidding-system strength or shape range, passing a forcing/Blackwood response, or misleading partner.",
     "2 - Marginal or borderline alternative call.",
     "3 - Good standard call consistent with hand strength, partnership system, and auction.",
-    "4 - Optimal textbook call under the partnership bidding system and live auction.",
+    "4 - Optimal textbook call under the partnership bidding system and live auction (including Active Strategy's live recommendation).",
 )
 
 __all__ = [
@@ -467,8 +467,9 @@ class GeminiDecisionsClient:
                         f"How good is the bridge auction call '{cand.label}' given the current hand, "
                         "live auction (including forcing bids and partner's calls), partnership "
                         "bidding system, and the Active Strategy's explicitly recommended call? "
-                        "Score the recommended call in Active Strategy highest when consistent with "
-                        "the live auction (including 4NT Blackwood / cuebids / game invites)."
+                        "Score the recommended call in Active Strategy highest (score 4) when consistent with "
+                        "the live auction (including 4NT Blackwood, 6-level slam completions after Ace checks "
+                        "5C=0/4 5D=1 5H=2 5S=3, cuebids, and game invites)."
                     ),
                     "criteria": list(_AUCTION_SCORE_CRITERIA),
                 }

@@ -146,9 +146,11 @@ class TacticalOptionEvaluator:
                     "Stayman 2C, Jacoby transfer, or negative double without a 4+ card trump stack). "
                     "Invite or bid game aggressively when combined strength reaches ~25+ pts with a fit, "
                     "and raise/cuebid partner's overcall with a 3/4-card fit and 10+ pts. "
-                    "Slams: use cuebids / 4NT Blackwood to check Aces with balanced 33+ combined HCP OR strong "
-                    "9+/10+-card trump fits with shortness/control strength (follow Active Strategy if it "
-                    "recommends 4NT Blackwood or a slam invite!); NEVER jump blindly to 6/7 without control checks."
+                    "Slams: use cuebids / 4NT Blackwood to check Aces (5C=0/4, 5D=1, 5H=2, 5S=3 Aces) with "
+                    "balanced 33+ combined HCP OR strong 9+/10+-card trump fits with shortness/control strength "
+                    "(follow Active Strategy if it recommends 4NT Blackwood or a slam invite!). After partner "
+                    "answers 4NT Blackwood (5C/5D/5H/5S), NEVER pass with 3 or 4 combined Aces — bid the slam "
+                    "(6-level suit/NT)! Sign off at the 5-level only if missing 2+ Aces; avoid blind 6/7 jumps without control checks."
                 )
             elif any_bid_made:
                 discipline_line = (

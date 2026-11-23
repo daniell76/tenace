@@ -43,7 +43,9 @@ SAYC_CONVENTION_CARD = ConventionCard(
         "Negative Double through 2S/3S shows unbid major(s) (NOT penalty — pull without a 4+ trump stack); "
         "cuebid of opponent's suit raises partner's overcall showing a limit+ raise (10+ pts with fit). "
         "Penalty doubles at 4/5-level: do NOT double distributional two-suiters on A/K side honors likely to get ruffed unless holding natural trump tricks. "
-        "Slam control: Blackwood 4NT (0/1/2/3 Aces) or Gerber 4C over NT. "
+        "Avoid stretching to an unsupported 4-level minor contract (especially vulnerable) opposite a partner who passed an enemy preempt, unless holding extra shape/trick strength. "
+        "Slam control: Blackwood 4NT asks for Aces (5C=0/4, 5D=1, 5H=2, 5S=3 Aces; 5NT asks for Kings: 6C=0, 6D=1, 6H=2, 6S=3) or Gerber 4C over NT. "
+        "After a 4NT Blackwood answer, NEVER pass out the artificial Ace-response when holding 3 or 4 combined Aces — bid the slam (6-level suit/NT, or 5NT for Kings); sign off at the 5-level only when missing 2+ Aces. "
         "Defensive carding: standard attitude (high encourages) and standard count (high-low = even)."
     ),
 )

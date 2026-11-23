@@ -207,6 +207,7 @@ def test_convention_card_immutability_and_zero_partner_state_leakage():
     assert "up the line" in rules_lower
     assert "rule of 20" in rules_lower
     assert "quick tricks" in rules_lower
+    assert "5c=0/4" in rules_lower and "5s=3" in rules_lower
     assert "attitude" in rules_lower and "count" in rules_lower
 
     # Empty or whitespace strings must be rejected
@@ -575,6 +576,7 @@ def test_layer2_auction_prompt_distinguishes_partner_active_vs_unopened():
     prompt_p2 = client.calls[1]["user_prompt"].lower()
     assert "forcing" in prompt_p2
     assert "6+ hcp" in prompt_p2
+    assert "5s=3" in prompt_p2
     assert "pass without opening strength" not in prompt_p2
 
 
