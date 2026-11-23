@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pyspiel
 
-from tenace.domain.types import Seat, StrategyState, Suit
+from tenace.domain.types import PASS_ACTION, Seat, StrategyState, Suit
 from tenace.layer1_strategist import (
     SAYC_CONVENTION_CARD,
     ConventionCard,
@@ -121,9 +121,24 @@ class TenaceAgent:
             if len(facts.played_cards) < 28
             else []
         )
+        needs_auction_replan = False
+        if (
+            facts.phase == "auction"
+            and self.strategy is not None
+            and self.strategy.phase == "auction"
+            and facts.auction_calls
+        ):
+            own_indices = [
+                i for i, (s, _call) in enumerate(facts.auction_calls) if s == self.seat
+            ]
+            if own_indices:
+                new_calls = facts.auction_calls[own_indices[-1] + 1 :]
+                needs_auction_replan = any(call != PASS_ACTION for _s, call in new_calls)
+
         needs_mandatory_plan = (
             self.strategy is None
             or self.strategy.phase != facts.phase
+            or needs_auction_replan
             or (
                 facts.phase == "play"
                 and facts.dummy_seat is not None
@@ -139,6 +154,8 @@ class TenaceAgent:
                 trigger_reasons.append(
                     f"Phase transition from {self.strategy.phase} to {facts.phase}"
                 )
+            elif needs_auction_replan:
+                trigger_reasons.append("New non-Pass auction call since previous turn")
             if (
                 facts.phase == "play"
                 and facts.dummy_seat is not None

@@ -1126,3 +1126,43 @@ def test_duplicate_runner_records_per_team_telemetry_in_head_to_head_match():
 
 
 
+
+
+def test_tenace_agent_replans_auction_when_new_non_pass_call_occurs():
+    """On round 2+ of an auction after partner/opponent makes a non-Pass call
+    (e.g. weak 2D -> 2S forcing, or 1H -> 2H raise), Layer-1 Strategist MUST replan
+    so Layer-2 never sees a stale Round-1 'Pass initially' strategy.
+    """
+    game = pyspiel.load_game("bridge(use_double_dummy_result=false)")
+    state = game.new_initial_state(tournament_seed=100, board_number=1)
+    strat_client = RecordingStructuredClient(
+        [
+            StrategyState(phase="auction", plan_summary="Open weak 2D"),
+            StrategyState(phase="auction", plan_summary="Respond 2NT to forcing 2S"),
+        ]
+    )
+    eval_client = RecordingStructuredClient(
+        [
+            TacticalDecision(option_scores={"2D": 0.95, "Pass": 0.1}),
+            TacticalDecision(option_scores={"2NT": 0.95, "Pass": 0.05}),
+        ]
+    )
+    agent = TenaceAgent(
+        seat=Seat.NORTH,
+        strategist_client=strat_client,
+        evaluator_client=eval_client,
+        dds_evaluator=RuleDDSEvaluator(num_worlds=1, rng_seed=7),
+    )
+    bid1 = agent.step(state.clone())
+    assert bid1 == FIRST_CONTRACT_BID_ACTION + 6  # 2D
+    assert agent.strategist_calls == 1
+    state.apply_action(bid1)
+    state.apply_action(PASS_ACTION)  # EAST Pass
+    state.apply_action(FIRST_CONTRACT_BID_ACTION + 8)  # SOUTH bids forcing 2S!
+    state.apply_action(PASS_ACTION)  # WEST Pass
+
+    # Back to NORTH: SOUTH bid 2S (non-Pass!), so Strategist MUST replan!
+    bid2 = agent.step(state.clone())
+    assert bid2 == FIRST_CONTRACT_BID_ACTION + 9  # 2NT
+    assert agent.strategist_calls == 2
+    assert "SOUTH:2S" in strat_client.calls[1]["user_prompt"]

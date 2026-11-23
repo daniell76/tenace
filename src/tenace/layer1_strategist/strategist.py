@@ -191,6 +191,11 @@ class StrategistEngine:
             f"Convention Summary: {self.convention_card.summary_rules}\n\n"
             "Synthesize a coherent multi-trick or multi-round StrategyState based ONLY on "
             "legal public information and your own visible cards.\n"
+            "During AUCTION: Start `plan_summary` by explicitly stating the single recommended call "
+            "for the LIVE turn (e.g., 'Bid 2NT...' or 'Raise to 4H...' or 'Pass...'). Always honor "
+            "forcing partnership bids (new-suit response over 1-level opening or weak-two, Stayman, "
+            "Jacoby transfers, cuebid limit raises, negative doubles) and never tell partner to pass a "
+            "1-level opening with 6+ HCP or drop a forcing bid.\n"
             "Constraint syntax rules for `seat_constraints`:\n"
             "- Outer keys and inner `seat` values must use seat names: "
             '"NORTH", "EAST", "SOUTH", or "WEST".\n'

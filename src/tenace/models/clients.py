@@ -435,8 +435,9 @@ class GeminiDecisionsClient:
                 questions[f"cand_{idx}"] = {
                     "type": "score",
                     "instructions": (
-                        f"How good is the bridge auction call '{cand.label}' under the "
-                        "partnership's bidding system for the current hand and live auction?"
+                        f"How good is the bridge auction call '{cand.label}' given the current hand, "
+                        "live auction (including forcing bids and partner's calls), partnership "
+                        "bidding system, and Active Strategy plan?"
                     ),
                     "criteria": list(_AUCTION_SCORE_CRITERIA),
                 }

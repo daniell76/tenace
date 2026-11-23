@@ -521,10 +521,55 @@ def test_layer2_evaluator_formats_candidates_and_returns_tactical_decision():
     assert "Tricks Won:" in user_prompt
     assert "Current Trick:" in user_prompt
     assert "D:K" in user_prompt
-
     assert "C:7" in user_prompt
     assert "baseline_ev=-100.0" in user_prompt
     assert "N/A" in user_prompt
+
+
+def test_layer2_auction_prompt_distinguishes_partner_active_vs_unopened():
+    client = RecordingStructuredClient(
+        [
+            TacticalDecision(option_scores={"Pass": 0.8, "1C": 0.2}),
+            TacticalDecision(option_scores={"1NT": 0.9, "Pass": 0.1}),
+        ]
+    )
+    evaluator = TacticalOptionEvaluator(client)
+    strat = StrategyState(phase="auction", plan_summary="Hold 9 HCP")
+
+    # 1. Unopened auction -> keeps opening strength rule
+    unopened = _make_facts(observer=Seat.EAST, phase="auction", own_hcp=9, auction_calls=[])
+    evaluator.evaluate(
+        unopened,
+        strat,
+        [
+            CandidateOption(action=PASS_ACTION, label="Pass"),
+            CandidateOption(action=FIRST_CONTRACT_BID_ACTION, label="1C"),
+        ],
+    )
+    assert "12+ HCP" in client.calls[0]["user_prompt"]
+
+    # 2. Partner (WEST) opened 1H -> MUST surface forcing/response guidance instead of "Pass without 12+ HCP"
+    partner_opened = _make_facts(
+        observer=Seat.EAST,
+        phase="auction",
+        own_hcp=9,
+        auction_calls=[
+            (Seat.WEST, FIRST_CONTRACT_BID_ACTION + 2),  # 1H
+            (Seat.NORTH, PASS_ACTION),
+        ],
+    )
+    evaluator.evaluate(
+        partner_opened,
+        strat,
+        [
+            CandidateOption(action=PASS_ACTION, label="Pass"),
+            CandidateOption(action=FIRST_CONTRACT_BID_ACTION + 4, label="1NT"),
+        ],
+    )
+    prompt_p2 = client.calls[1]["user_prompt"].lower()
+    assert "forcing" in prompt_p2
+    assert "6+ hcp" in prompt_p2
+    assert "pass without opening strength" not in prompt_p2
 
 
 def test_layer2_evaluator_marks_acting_hand_dummy_when_declarer_plays_dummy_cards():

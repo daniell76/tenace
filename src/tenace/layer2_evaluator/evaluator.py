@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from tenace.domain.types import (
+    PASS_ACTION,
     CandidateOption,
     StrategyState,
     TacticalDecision,
@@ -130,14 +131,39 @@ class TacticalOptionEvaluator:
             )
         user_lines.append("")
         if facts.phase == "auction":
+            partner_has_acted = any(
+                s == facts.observer.partner and call != PASS_ACTION
+                for s, call in facts.auction_calls
+            )
+            any_bid_made = any(call != PASS_ACTION for _s, call in facts.auction_calls)
+            if partner_has_acted:
+                discipline_line = (
+                    "Discipline: Partner has entered the auction — follow the LIVE auction carefully. "
+                    "Respond with 6+ HCP to a 1-level suit opening (do NOT pass with 6+ HCP); "
+                    "NEVER pass a forcing bid (new suit by unpassed hand, new suit over a weak two, "
+                    "Stayman 2C, Jacoby transfer, or negative double without a 4+ card trump stack). "
+                    "Invite or bid game aggressively when combined strength reaches ~25+ pts with a fit, "
+                    "and raise/cuebid partner's overcall with a 3/4-card fit and 10+ pts. "
+                    "Do NOT bid slams (6/7-level) without ~33+ combined HCP and Ace/keycard control."
+                )
+            elif any_bid_made:
+                discipline_line = (
+                    "Discipline: Opponents have opened. Enter only with a sound overcall/double/preempt "
+                    "(or two-suited 2NT Unusual / Michaels with 5-5+ shape); compete thoughtfully by shape "
+                    "and vulnerability. Avoid reckless low-level doubles or slams without ~33+ combined HCP."
+                )
+            else:
+                discipline_line = (
+                    "Discipline: Unopened auction — Pass without opening strength (12+ HCP / Rule of 20, "
+                    "or Rule of 15 in 4th seat), unless holding a textbook weak two (6-card suit, 5-11 HCP) "
+                    "or 3-level preempt (7+ card suit). Avoid speculative slams or off-shape bids."
+                )
             user_lines.extend(
                 [
                     "=== Partnership Bidding System ===",
                     f"System: {self.convention_card.name}",
                     f"Rules: {self.convention_card.summary_rules}",
-                    "Discipline: Pass without opening strength (12+ HCP / Rule of 20, or Rule of 15 in 4th seat). "
-                    "Do NOT double marginal contracts lightly, run out of doubled contracts to hopeless higher levels, "
-                    "or bid slams (6/7-level) without ~33+ combined HCP and Ace/keycard control.",
+                    discipline_line,
                     "",
                 ]
             )
