@@ -138,13 +138,15 @@ class TacticalOptionEvaluator:
             any_bid_made = any(call != PASS_ACTION for _s, call in facts.auction_calls)
             if partner_has_acted:
                 discipline_line = (
-                    "Discipline: Partner has entered the auction — follow the LIVE auction carefully. "
+                    "Discipline: Partner has entered the auction — follow the LIVE auction and Active Strategy carefully. "
                     "Respond with 6+ HCP to a 1-level suit opening (do NOT pass with 6+ HCP); "
                     "NEVER pass a forcing bid (new suit by unpassed hand, new suit over a weak two, "
                     "Stayman 2C, Jacoby transfer, or negative double without a 4+ card trump stack). "
                     "Invite or bid game aggressively when combined strength reaches ~25+ pts with a fit, "
                     "and raise/cuebid partner's overcall with a 3/4-card fit and 10+ pts. "
-                    "Do NOT bid slams (6/7-level) without ~33+ combined HCP and Ace/keycard control."
+                    "Slams: use cuebids / 4NT Blackwood to check Aces with balanced 33+ combined HCP OR strong "
+                    "9+/10+-card trump fits with shortness/control strength (follow Active Strategy if it "
+                    "recommends 4NT Blackwood or a slam invite!); NEVER jump blindly to 6/7 without control checks."
                 )
             elif any_bid_made:
                 discipline_line = (

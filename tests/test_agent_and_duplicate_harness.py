@@ -1166,3 +1166,52 @@ def test_tenace_agent_replans_auction_when_new_non_pass_call_occurs():
     assert bid2 == FIRST_CONTRACT_BID_ACTION + 9  # 2NT
     assert agent.strategist_calls == 2
     assert "SOUTH:2S" in strat_client.calls[1]["user_prompt"]
+
+
+def test_tenace_agent_skips_redundant_auction_replan_on_flat_bust_hand():
+    """A flat busted hand (<=5 HCP, max suit length <=4) should NOT re-invoke expensive Layer-1
+    every round when only opponents are bidding (partner hasn't acted).
+    """
+    game = pyspiel.load_game("bridge(use_double_dummy_result=false)")
+    state = game.new_initial_state()
+    # Deterministic deal where NORTH holds a 4-3-3-3 flat 0-HCP bust (2..6 only).
+    n_cards = [
+        card_id(Suit.CLUBS, 0), card_id(Suit.CLUBS, 1), card_id(Suit.CLUBS, 2), card_id(Suit.CLUBS, 3),
+        card_id(Suit.DIAMONDS, 0), card_id(Suit.DIAMONDS, 1), card_id(Suit.DIAMONDS, 2),
+        card_id(Suit.HEARTS, 0), card_id(Suit.HEARTS, 1), card_id(Suit.HEARTS, 2),
+        card_id(Suit.SPADES, 0), card_id(Suit.SPADES, 1), card_id(Suit.SPADES, 2),
+    ]
+    used = set(n_cards)
+    rem = [c for c in range(52) if c not in used]
+    e_cards, s_cards, w_cards = rem[0:13], rem[13:26], rem[26:39]
+    for r in range(13):
+        state.apply_action(n_cards[r])
+        state.apply_action(e_cards[r])
+        state.apply_action(s_cards[r])
+        state.apply_action(w_cards[r])
+
+    strat_client = RecordingStructuredClient(
+        [StrategyState(phase="auction", plan_summary="Pass flat 0 HCP")]
+    )
+    eval_client = RecordingStructuredClient(
+        [
+            TacticalDecision(option_scores={"Pass": 1.0}),
+            TacticalDecision(option_scores={"Pass": 1.0}),
+        ]
+    )
+    agent = TenaceAgent(
+        seat=Seat.NORTH,
+        strategist_client=strat_client,
+        evaluator_client=eval_client,
+        dds_evaluator=RuleDDSEvaluator(num_worlds=1, rng_seed=3),
+    )
+    assert agent.step(state.clone()) == PASS_ACTION
+    assert agent.strategist_calls == 1
+    state.apply_action(PASS_ACTION)  # N passes
+    state.apply_action(FIRST_CONTRACT_BID_ACTION + 3)  # E opens 1S
+    state.apply_action(PASS_ACTION)  # S passes
+    state.apply_action(FIRST_CONTRACT_BID_ACTION + 18)  # W bids 4S
+
+    # Back to N (flat 0 HCP, partner passed): MUST NOT burn a 2nd Strategist call!
+    assert agent.step(state.clone()) == PASS_ACTION
+    assert agent.strategist_calls == 1

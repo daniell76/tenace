@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pyspiel
 
-from tenace.domain.types import PASS_ACTION, Seat, StrategyState, Suit
+from tenace.domain.types import PASS_ACTION, Seat, StrategyState, Suit, card_suit
 from tenace.layer1_strategist import (
     SAYC_CONVENTION_CARD,
     ConventionCard,
@@ -133,7 +133,19 @@ class TenaceAgent:
             ]
             if own_indices:
                 new_calls = facts.auction_calls[own_indices[-1] + 1 :]
-                needs_auction_replan = any(call != PASS_ACTION for _s, call in new_calls)
+                if any(call != PASS_ACTION for _s, call in new_calls):
+                    # Skip redundant Strategist replans for flat busted hands (<=5 HCP, no 5-card suit)
+                    # when partner has not made any new non-Pass bid since our previous turn.
+                    suit_counts: dict[Suit, int] = {st: 0 for st in Suit}
+                    for card in facts.own_cards:
+                        suit_counts[card_suit(card)] += 1
+                    max_suit_len = max(suit_counts.values(), default=0)
+                    partner_new_bid = any(
+                        s == self.seat.partner and call != PASS_ACTION
+                        for s, call in new_calls
+                    )
+                    is_flat_bust = facts.own_hcp <= 5 and max_suit_len <= 4
+                    needs_auction_replan = partner_new_bid or not is_flat_bust
 
         needs_mandatory_plan = (
             self.strategy is None

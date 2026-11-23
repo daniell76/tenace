@@ -466,7 +466,9 @@ class GeminiDecisionsClient:
                     "instructions": (
                         f"How good is the bridge auction call '{cand.label}' given the current hand, "
                         "live auction (including forcing bids and partner's calls), partnership "
-                        "bidding system, and Active Strategy plan?"
+                        "bidding system, and the Active Strategy's explicitly recommended call? "
+                        "Score the recommended call in Active Strategy highest when consistent with "
+                        "the live auction (including 4NT Blackwood / cuebids / game invites)."
                     ),
                     "criteria": list(_AUCTION_SCORE_CRITERIA),
                 }
