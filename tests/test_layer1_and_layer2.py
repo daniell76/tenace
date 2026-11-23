@@ -208,6 +208,7 @@ def test_convention_card_immutability_and_zero_partner_state_leakage():
     assert "rule of 20" in rules_lower
     assert "quick tricks" in rules_lower
     assert "5c=0/4" in rules_lower and "5s=3" in rules_lower
+    assert "undoubled" in rules_lower and "law of total tricks" in rules_lower
     assert "attitude" in rules_lower and "count" in rules_lower
 
     # Empty or whitespace strings must be rejected
