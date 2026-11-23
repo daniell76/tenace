@@ -18,7 +18,7 @@ from tenace.domain.types import (
     card_suit,
 )
 from tenace.layer1_strategist.conventions import SAYC_CONVENTION_CARD, ConventionCard
-from tenace.layer3_rules.tracker import BoardFactSnapshot
+from tenace.layer3_rules.tracker import BoardFactSnapshot, trick_winner
 from tenace.models.clients import StructuredModelClient
 
 __all__ = [
@@ -27,6 +27,7 @@ __all__ = [
     "format_cards_by_suit",
     "format_contract_summary",
     "format_known_voids",
+    "format_play_state",
 ]
 
 _SUIT_DISPLAY_ORDER = (Suit.SPADES, Suit.HEARTS, Suit.DIAMONDS, Suit.CLUBS)
@@ -85,6 +86,63 @@ def format_known_voids(known_voids: dict[Seat, set[Suit]]) -> str:
             suit_names = ", ".join(s.name for s in voids)
             entries.append(f"{seat.name}: [{suit_names}]")
     return "; ".join(entries) if entries else "(none)"
+
+
+def format_play_state(facts: BoardFactSnapshot) -> tuple[str, str, str]:
+    """Return `(tricks_won_line, completed_tricks_line, current_trick_line)` for play prompts."""
+    if facts.declarer is None:
+        return "(none)", "(none)", "(none)"
+
+    decl_side_label = "NS" if facts.declarer.partnership == 0 else "EW"
+    def_side_label = "EW" if facts.declarer.partnership == 0 else "NS"
+    need = 6 + facts.contract_level if facts.contract_level > 0 else 0
+
+    leader = Seat((int(facts.declarer) + 1) % 4)
+    decl_tricks = 0
+    def_tricks = 0
+    completed_parts: list[str] = []
+    played = facts.played_cards
+    num_full = len(played) // 4
+
+    for t_idx in range(num_full):
+        cards = played[t_idx * 4 : (t_idx + 1) * 4]
+        plays = [
+            (Seat((int(leader) + offset) % 4), card)
+            for offset, card in enumerate(cards)
+        ]
+        winner = trick_winner(plays, facts.trump_denom)
+        if winner.partnership == facts.declarer.partnership:
+            decl_tricks += 1
+        else:
+            def_tricks += 1
+        cards_txt = " ".join(f"{s.name[0]}:{action_label(c)}" for s, c in plays)
+        completed_parts.append(f"T{t_idx + 1}: {cards_txt} -> {winner.name[0]}")
+        leader = winner
+
+    in_trick = played[num_full * 4 :]
+    trick_no = num_full + 1
+    if in_trick:
+        partial_plays = [
+            (Seat((int(leader) + offset) % 4), card)
+            for offset, card in enumerate(in_trick)
+        ]
+        led_suit = card_suit(in_trick[0])
+        winning_seat = trick_winner(partial_plays, facts.trump_denom)
+        winning_card = next(c for s, c in partial_plays if s == winning_seat)
+        cards_txt = " ".join(f"{s.name[0]}:{action_label(c)}" for s, c in partial_plays)
+        current_line = (
+            f"Trick {trick_no} (in progress): {cards_txt} "
+            f"[led: {led_suit.name}, currently winning: {winning_seat.name} {action_label(winning_card)}]"
+        )
+    else:
+        current_line = f"Trick {trick_no} (new trick — {leader.name} to lead)"
+
+    need_note = f" (target {need} to make)" if need > 0 else ""
+    tricks_won_line = (
+        f"Declarer ({decl_side_label}): {decl_tricks} | Defense ({def_side_label}): {def_tricks}{need_note}"
+    )
+    completed_line = " | ".join(completed_parts) if completed_parts else "(none yet)"
+    return tricks_won_line, completed_line, current_line
 
 
 class StrategistEngine:
@@ -166,7 +224,15 @@ class StrategistEngine:
             f"Dummy: {dummy_line}",
         ]
         if facts.phase == "play":
-            lines.append(f"Contract: {format_contract_summary(facts)}")
+            tricks_won_line, completed_line, current_line = format_play_state(facts)
+            lines.extend(
+                [
+                    f"Contract: {format_contract_summary(facts)}",
+                    f"Tricks Won: {tricks_won_line}",
+                    f"Completed Tricks: {completed_line}",
+                    f"Current Trick: {current_line}",
+                ]
+            )
         lines.extend(
             [
                 f"Auction Sequence: {format_auction_sequence(facts.auction_calls)}",

@@ -29,6 +29,7 @@ class TenaceAgent:
         evaluator_client: StructuredModelClient,
         dds_evaluator: RuleDDSEvaluator | None = None,
         convention_card: ConventionCard = SAYC_CONVENTION_CARD,
+        max_play_replans: int = 3,
     ) -> None:
         self.seat = Seat(seat)
         self.tracker = RuleFactTracker()
@@ -43,11 +44,15 @@ class TenaceAgent:
         self.dds_evaluator = (
             dds_evaluator if dds_evaluator is not None else RuleDDSEvaluator()
         )
+        if isinstance(max_play_replans, bool) or max_play_replans < 1:
+            raise ValueError(f"max_play_replans must be >= 1, got {max_play_replans!r}")
+        self.max_play_replans = int(max_play_replans)
 
         self.strategy: StrategyState | None = None
         self.strategy_history: list[StrategyState] = []
         self._prev_voids: dict[Seat, set[Suit]] | None = None
         self._dummy_seen: bool = False
+        self._play_strategist_calls: int = 0
 
         self.forced_moves: int = 0
         self.strategist_calls: int = 0
@@ -59,6 +64,7 @@ class TenaceAgent:
         self.strategy_history = []
         self._prev_voids = None
         self._dummy_seen = False
+        self._play_strategist_calls = 0
 
     def reset_stats(self) -> None:
         """Reset cumulative telemetry counters (`forced_moves`, `strategist_calls`, `evaluator_calls`)."""
@@ -101,12 +107,31 @@ class TenaceAgent:
 
         self._prev_voids = {s: set(voids) for s, voids in facts.known_voids.items()}
 
-        # Layer 1 Event-Driven Strategist Check
-        if self.strategist.should_replan(
-            facts,
-            self.strategy,
-            dummy_already_seen=self._dummy_seen,
-        ):
+        # Layer 1 Event-Driven Strategist Check (filter out non-surprising own/dummy voids
+        # and late endgame suit runouts so Layer 1 only replans when information changes).
+        visible_seats = {self.seat.name}
+        if facts.dummy_seat is not None:
+            visible_seats.add(facts.dummy_seat.name)
+        meaningful_surprises = (
+            [
+                ev
+                for ev in facts.surprise_events
+                if ev.split(" ", 1)[0] not in visible_seats
+            ]
+            if len(facts.played_cards) < 28
+            else []
+        )
+        needs_mandatory_plan = (
+            self.strategy is None
+            or self.strategy.phase != facts.phase
+            or (
+                facts.phase == "play"
+                and facts.dummy_seat is not None
+                and not self._dummy_seen
+            )
+        )
+        has_budget = facts.phase != "play" or self._play_strategist_calls < self.max_play_replans
+        if needs_mandatory_plan or (meaningful_surprises and has_budget):
             trigger_reasons: list[str] = []
             if self.strategy is None:
                 trigger_reasons.append("Initial board planning")
@@ -120,7 +145,9 @@ class TenaceAgent:
                 and not self._dummy_seen
             ):
                 trigger_reasons.append("Dummy revealed after opening lead")
-            if facts.surprise_events:
+            if meaningful_surprises:
+                trigger_reasons.append("; ".join(meaningful_surprises))
+            elif facts.surprise_events:
                 trigger_reasons.append("; ".join(facts.surprise_events))
 
             self.strategy = self.strategist.update_strategy(
@@ -130,6 +157,8 @@ class TenaceAgent:
             )
             self.strategy_history.append(self.strategy)
             self.strategist_calls += 1
+            if facts.phase == "play":
+                self._play_strategist_calls += 1
             if facts.dummy_seat is not None:
                 self._dummy_seen = True
 
@@ -151,8 +180,12 @@ class TenaceAgent:
         )
         self.evaluator_calls += 1
 
-        # Closed-Loop Assumption Violation Interrupt (bounded to at most 1 replan per step)
-        if decision.assumption_violated:
+        # Closed-Loop Assumption Violation Interrupt (bounded to at most 1 replan per step,
+        # and capped during play phase by max_play_replans to avoid endgame thrashing)
+        can_interrupt = (
+            facts.phase != "play" or self._play_strategist_calls < self.max_play_replans
+        )
+        if decision.assumption_violated and can_interrupt:
             reason = (
                 decision.violation_reason.strip()
                 if decision.violation_reason.strip()
@@ -165,6 +198,8 @@ class TenaceAgent:
             )
             self.strategy_history.append(self.strategy)
             self.strategist_calls += 1
+            if facts.phase == "play":
+                self._play_strategist_calls += 1
             if facts.dummy_seat is not None:
                 self._dummy_seen = True
 

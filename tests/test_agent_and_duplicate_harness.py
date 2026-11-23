@@ -442,6 +442,14 @@ def test_tenace_agent_reruns_strategist_when_layer2_flags_assumption_violation()
     )
 
     action = agent.step(state)
+    # Verify play-phase self/dummy show-outs and endgame caps avoid runaway L1 replanning
+    agent_capped = TenaceAgent(
+        seat=Seat.NORTH,
+        strategist_client=RecordingStructuredClient([]),
+        evaluator_client=RecordingStructuredClient([]),
+        max_play_replans=2,
+    )
+    assert agent_capped.max_play_replans == 2
     assert action == PASS_ACTION
     # Initial Strategist (rev 1) + Assumption-violation Strategist interrupt (rev 2) = 2 calls
     assert agent.strategist_calls == 2

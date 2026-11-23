@@ -8,6 +8,7 @@ from tenace.layer1_strategist.strategist import (
     format_cards_by_suit,
     format_contract_summary,
     format_known_voids,
+    format_play_state,
 )
 
 __all__ = [
@@ -18,4 +19,5 @@ __all__ = [
     "format_cards_by_suit",
     "format_contract_summary",
     "format_known_voids",
+    "format_play_state",
 ]

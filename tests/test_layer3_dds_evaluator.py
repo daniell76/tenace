@@ -529,3 +529,132 @@ def test_select_guarded_action_auction_phase_respects_sayc_and_avoids_dds_traps(
 
     # 7. Missing/empty decision falls back to DDS EV safely
     assert evaluator.select_guarded_action([pass_opt, open_1c], None, phase="auction") == 55
+
+
+def test_score_bridge_contract_matches_official_wbf_scoring():
+    from tenace.layer3_rules.dds_evaluator import score_bridge_contract
+
+    cases = [
+        # (level, denom, doubled, vul, decl_tricks, expected_score)
+        # denom: 0=C, 1=D, 2=H, 3=S, 4=NT
+        (1, 4, 0, False, 7, 90),
+        (1, 4, 0, False, 6, -50),
+        (1, 4, 0, False, 4, -150),
+        (1, 4, 0, True, 6, -100),
+        (3, 4, 0, True, 9, 600),
+        (3, 4, 0, False, 10, 430),
+        (4, 3, 1, True, 10, 790),
+        (4, 3, 1, True, 11, 990),
+        (4, 3, 2, False, 11, 1080),
+        (6, 2, 0, True, 12, 1430),
+        (7, 4, 2, True, 13, 2980),
+        (3, 4, 1, False, 5, -800),
+        (3, 4, 1, False, 6, -500),
+        (3, 4, 1, True, 7, -500),
+        (2, 0, 1, False, 9, 280),
+        (1, 0, 2, False, 7, 230),
+        (2, 1, 0, False, 9, 110),
+        (5, 0, 0, True, 11, 600),
+    ]
+    for level, denom, doubled, vul, tricks, expected in cases:
+        assert score_bridge_contract(level, denom, doubled, vul, tricks) == expected
+
+
+def test_play_phase_uses_exact_cpp_dds_board2_trick5_stopper_preservation():
+    """Regression from BEN duplicate match Board 2 (seed=42), Closed Room Trick 5:
+    In 1NT by West (N/S vulnerable, E/W non-vul), South leads D:A on Trick 5.
+    Exact double-dummy solver MUST show D:2 keeps the D:Q stopper (7 tricks, +90 EW)
+    while crashing D:Q under D:A loses 3 extra diamond tricks (4 tricks, -150 EW).
+    """
+    from tenace.layer3_rules.dds_evaluator import solve_play_world_scores
+
+    # Deal from seed=42 board 2:
+    # N: 98652.AK43.6.852  E: JT43.872.T98.KJ4  S: .QJ65.AKJ75.QT93  W: AKQ7.T9.Q432.A76
+    def _pbn(s_str: str) -> list[int]:
+        rank_map = {ch: i for i, ch in enumerate("23456789TJQKA")}
+        suit_order = (Suit.SPADES, Suit.HEARTS, Suit.DIAMONDS, Suit.CLUBS)
+        cards: list[int] = []
+        for suit, part in zip(suit_order, s_str.split("."), strict=True):
+            for ch in part:
+                cards.append(card_id(suit, rank_map[ch]))
+        return cards
+
+    hands = {
+        0: _pbn("98652.AK43.6.852"),
+        1: _pbn("JT43.872.T98.KJ4"),
+        2: _pbn(".QJ65.AKJ75.QT93"),
+        3: _pbn("AKQ7.T9.Q432.A76"),
+    }
+    game = pyspiel.load_game(
+        "bridge",
+        {
+            "dealer": int(Seat.EAST),
+            "dealer_vul": False,
+            "non_dealer_vul": True,
+            "use_double_dummy_result": False,
+        },
+    )
+    state = game.new_initial_state()
+    for r in range(13):
+        for p in range(4):
+            state.apply_action(hands[p][r])
+
+    # Auction: E:Pass, S:1D, W:1NT, N:Pass, E:Pass, S:Pass
+    for bid in (PASS_ACTION, 56, 59, PASS_ACTION, PASS_ACTION, PASS_ACTION):
+        state.apply_action(bid)
+
+    # Play exact first 4 tricks + Trick 5 lead S:D:A
+    rank_map = {ch: i for i, ch in enumerate("23456789TJQKA")}
+    suit_map = {"C": Suit.CLUBS, "D": Suit.DIAMONDS, "H": Suit.HEARTS, "S": Suit.SPADES}
+
+    def _c(tok: str) -> int:
+        return card_id(suit_map[tok[0]], rank_map[tok[1]])
+
+    for tok in (
+        "D6", "DT", "DK", "D4",
+        "H5", "HT", "HK", "H8",
+        "HA", "H2", "HQ", "H9",
+        "H3", "H7", "HJ", "C7",
+        "DA",
+    ):
+        state.apply_action(_c(tok))
+
+    assert state.current_player() == int(Seat.WEST)
+    exact_scores = solve_play_world_scores(state, observer=Seat.WEST)
+    assert exact_scores is not None
+    # Keeping D:Q by playing D:2 or D:3 makes 1NT (+90 EW)!
+    assert exact_scores[_c("D2")] == 90.0
+    assert exact_scores[_c("D3")] == 90.0
+    # Crashing D:Q under D:A loses 3 extra diamond tricks (-150 EW)!
+    assert exact_scores[_c("DQ")] == -150.0
+
+
+def test_play_ev_blunder_gate_blocks_extra_undertricks_when_make_prob_tied():
+    evaluator = RuleDDSEvaluator(max_make_prob_drop=0.20, max_ev_drop=45.0)
+    down_1 = CandidateOption(
+        action=card_id(Suit.DIAMONDS, 0),
+        label="D:2",
+        baseline_ev=-50.0,
+        make_prob=0.0,
+    )
+    down_3 = CandidateOption(
+        action=card_id(Suit.DIAMONDS, 10),
+        label="D:Q",
+        baseline_ev=-150.0,
+        make_prob=0.0,
+    )
+    # Even if Layer-2 hallucinates D:Q (1.0) over D:2 (0.0), max_ev_drop=45 gates D:Q out!
+    decision = TacticalDecision(option_scores={"D:Q": 1.0, "D:2": 0.0})
+    assert (
+        evaluator.select_guarded_action([down_1, down_3], decision, phase="play")
+        == down_1.action
+    )
+
+    # Close 20pt difference remains eligible for Layer-2 tactical tie-breaking
+    c_hi = CandidateOption(action=card_id(Suit.SPADES, 12), label="S:A", baseline_ev=120.0, make_prob=1.0)
+    c_lo = CandidateOption(action=card_id(Suit.HEARTS, 12), label="H:A", baseline_ev=90.0, make_prob=1.0)
+    prefer_lo = TacticalDecision(option_scores={"H:A": 0.95, "S:A": 0.10})
+    assert (
+        evaluator.select_guarded_action([c_hi, c_lo], prefer_lo, phase="play")
+        == c_lo.action
+    )

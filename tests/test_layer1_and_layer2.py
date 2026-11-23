@@ -517,6 +517,10 @@ def test_layer2_evaluator_formats_candidates_and_returns_tactical_decision():
     assert "H:Q" in user_prompt
     assert "baseline_ev=-50.2" in user_prompt
     assert "make_prob=0.44" in user_prompt or "0.44" in user_prompt
+    # Structured trick-by-trick play context exposes Current Trick and Tricks Won
+    assert "Tricks Won:" in user_prompt
+    assert "Current Trick:" in user_prompt
+    assert "D:K" in user_prompt
 
     assert "C:7" in user_prompt
     assert "baseline_ev=-100.0" in user_prompt

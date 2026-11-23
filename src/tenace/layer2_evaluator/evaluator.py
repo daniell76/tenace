@@ -13,6 +13,7 @@ from tenace.layer1_strategist import (
     format_cards_by_suit,
     format_contract_summary,
     format_known_voids,
+    format_play_state,
 )
 from tenace.layer3_rules.tracker import BoardFactSnapshot
 from tenace.models.clients import StructuredModelClient
@@ -116,9 +117,18 @@ class TacticalOptionEvaluator:
                 f"Auction: {format_auction_sequence(facts.auction_calls)}",
                 f"Played Cards: {played_summary}",
                 f"Known Voids: {format_known_voids(facts.known_voids)}",
-                "",
             ]
         )
+        if facts.phase == "play":
+            tricks_won_line, completed_line, current_line = format_play_state(facts)
+            user_lines.extend(
+                [
+                    f"Tricks Won: {tricks_won_line}",
+                    f"Completed Tricks: {completed_line}",
+                    f"Current Trick: {current_line}",
+                ]
+            )
+        user_lines.append("")
         if facts.phase == "auction":
             user_lines.extend(
                 [
