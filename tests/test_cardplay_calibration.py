@@ -284,6 +284,17 @@ def test_weak_jump_overcall_and_five_level_pull_constraints() -> None:
     assert cons_wjo[Seat.EAST].max_hcp <= 12
 
 
+def test_l2_auction_discipline_preserves_slam_exploration_at_32_plus_hcp() -> None:
+    from tenace.layer2_evaluator.evaluator import (
+        DEFAULT_L2_AUCTION_SYSTEM_PROMPT,
+        DEFAULT_L2_DISCIPLINE_PARTNER_ACTIVE,
+    )
+
+    assert "32+" in DEFAULT_L2_AUCTION_SYSTEM_PROMPT
+    assert "32+" in DEFAULT_L2_DISCIPLINE_PARTNER_ACTIVE
+    assert "3nt" in DEFAULT_L2_DISCIPLINE_PARTNER_ACTIVE.lower()
+
+
 def test_infer_symbolic_constraints_4nt_rkcb_and_penalty_pass_double() -> None:
     # 3H - P - 4NT - P - 5C - P - 5H -> West asked keycards facing a preempt => strong (16+ HCP)!
     st_rkcb = _state_after_auction(
