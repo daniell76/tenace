@@ -603,13 +603,38 @@ def infer_symbolic_auction_constraints(
                             min_len[seat][suit_enum] = max(min_len[seat].get(suit_enum, 0), 4)
                         elif level == 2 and suit_enum is not None and open_lvl == 1:
                             if not (denom in (0, 1) and open_denom == 4):
-                                min_hcp[seat] = max(min_hcp[seat], 5)
-                                min_len[seat][suit_enum] = max(
-                                    min_len[seat].get(suit_enum, 0), 5
+                                is_single_jump = open_denom < 4 and denom > open_denom and (
+                                    last_contract_bid is not None and last_contract_bid[1] == 1 and last_contract_bid[2] < denom
                                 )
+                                if is_single_jump and seat.partner not in doubled_opening_seat:
+                                    # Weak jump overcall (e.g. 1C - 2S, 1D - 2H): 6+ card suit, preemptive.
+                                    min_hcp[seat] = max(min_hcp[seat], 4)
+                                    max_hcp[seat] = min(max_hcp[seat], 12)
+                                    min_len[seat][suit_enum] = max(
+                                        min_len[seat].get(suit_enum, 0), 6
+                                    )
+                                else:
+                                    min_hcp[seat] = max(min_hcp[seat], 5)
+                                    min_len[seat][suit_enum] = max(
+                                        min_len[seat].get(suit_enum, 0), 5
+                                    )
                         elif level == 3 and suit_enum is not None and not opener_side_bid_nt:
-                            # Advancing partner's takeout double / 3-level jump/overcall in a natural suit
-                            min_len[seat][suit_enum] = max(min_len[seat].get(suit_enum, 0), 4)
+                            is_jump_overcall_3 = (
+                                open_lvl == 1
+                                and seat.partner not in doubled_opening_seat
+                                and last_contract_bid is not None
+                                and last_contract_bid[1] == 1
+                            )
+                            if is_jump_overcall_3:
+                                # Direct jump overcall to 3-level over 1X (e.g. 1S - 3H): 7+ card preempt!
+                                min_hcp[seat] = max(min_hcp[seat], 3)
+                                max_hcp[seat] = min(max_hcp[seat], 12)
+                                min_len[seat][suit_enum] = max(
+                                    min_len[seat].get(suit_enum, 0), 7
+                                )
+                            else:
+                                # Advancing partner's takeout double / competitive 3-level bid
+                                min_len[seat][suit_enum] = max(min_len[seat].get(suit_enum, 0), 4)
                     elif (
                         level == 3
                         and suit_enum is not None
@@ -668,6 +693,18 @@ def infer_symbolic_auction_constraints(
                     ):
                         req_reb = 6 if (open_denom in (2, 3) and not is_acol) else 5
                         min_len[seat][suit_enum] = max(min_len[seat].get(suit_enum, 0), req_reb)
+                    if (
+                        seat == open_seat
+                        and level == 5
+                        and denom == open_denom
+                        and open_denom in (2, 3)
+                        and open_lvl == 1
+                        and last_contract_bid is not None
+                        and last_contract_bid[0].partnership != side
+                        and suit_enum is not None
+                    ):
+                        # Opener competing unilaterally to 5M over an enemy 5-level bid shows 6+ trumps.
+                        min_len[seat][suit_enum] = max(min_len[seat].get(suit_enum, 0), 6)
 
             if denom < 4:
                 last_contract_denom_by_side[side].add(denom)
@@ -886,6 +923,15 @@ class RuleDDSEvaluator:
         effective_worlds = target_worlds
         if effective_worlds is None and is_play_opening_lead and self.num_worlds >= 4:
             effective_worlds = min(self.num_worlds * 3, 48)
+        elif (
+            effective_worlds is None
+            and state.current_phase() == 2
+            and self.num_worlds >= 8
+            and not any(c.action >= BIDDING_ACTION_BASE for c in candidates)
+        ):
+            play_count = sum(1 for e in state.full_history()[NUM_CARDS:] if e.action < BIDDING_ACTION_BASE)
+            if 0 < play_count < 16:
+                effective_worlds = min(self.num_worlds + 8, 24)
 
         if target_worlds is None and system_id is None and effective_worlds is None:
             worlds = self.sample_consistent_worlds(state, observer, strategy)

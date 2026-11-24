@@ -263,6 +263,27 @@ def test_play_strategist_prompt_interior_sequence_and_nt_ak_lead() -> None:
     assert "kjt" in low
 
 
+def test_weak_jump_overcall_and_five_level_pull_constraints() -> None:
+    # Seed 3600 Bd 6: EAST:1S -> SOUTH:3H (weak jump overcall, 7+ H!) -> WEST:4S -> NORTH:5H -> EAST:5S -> P - P - P
+    st = _state_after_auction(
+        3600,
+        6,
+        ["1S", "3H", "4S", "5H", "5S", "Pass", "Pass", "Pass"],
+    )
+    cons = infer_symbolic_auction_constraints(st, Seat.NORTH, system_id="ccba")
+    # SOUTH's 3H weak jump overcall over 1S promises 7+ hearts (preemptive 3..12 HCP)
+    assert cons[Seat.SOUTH].min_suit_lengths.get(Suit.HEARTS, 0) >= 7
+    assert cons[Seat.SOUTH].max_hcp <= 12
+    # EAST pulling 5H alone to 5S over partner's 4S promises extra trump length (6+ spades)
+    assert cons[Seat.EAST].min_suit_lengths.get(Suit.SPADES, 0) >= 6
+
+    # Single jump overcall 1C - 2S promises 6+ spades (weak)
+    st_wjo = _state_after_auction(3000, 1, ["1C", "2S", "Pass", "Pass", "Pass"])
+    cons_wjo = infer_symbolic_auction_constraints(st_wjo, Seat.NORTH, system_id="ccba")
+    assert cons_wjo[Seat.EAST].min_suit_lengths.get(Suit.SPADES, 0) >= 6
+    assert cons_wjo[Seat.EAST].max_hcp <= 12
+
+
 def test_infer_symbolic_constraints_4nt_rkcb_and_penalty_pass_double() -> None:
     # 3H - P - 4NT - P - 5C - P - 5H -> West asked keycards facing a preempt => strong (16+ HCP)!
     st_rkcb = _state_after_auction(

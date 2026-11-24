@@ -1,7 +1,7 @@
 ---
 id: ccba
 name: CCBA Natural (2/1 GF Standard)
-version: "1.1"
+version: "1.2"
 description: Chinese Contract Bridge Association standard natural 2/1 GF with semi-forcing 1NT, inverted minors, Jacoby 2NT, and RKCB 1430.
 nt_range: "15-17"
 slam_control: "RKCB 1430 (5C=1/4, 5D=0/3, 5H=2 no Q, 5S=2 w/ Q)"
@@ -30,3 +30,4 @@ Chinese Contract Bridge Association (CCBA) modern natural **2/1 Game Forcing** s
 - **Weak-Two Opening Frequency (`2D`/`2H`/`2S`):** Open classical weak two-bids (`6`-card suit, `5–10` HCP) in 1st/2nd/3rd seat whenever holding **favorable/equal vulnerability (`Q9xxxx+` or better)** OR **`9–10` HCP with connected intermediates (`JT9xxx+`)**. Do not routinely pass legitimate 6-card weak twos when non-vulnerable merely for soft honors.
 - **`2/1` GF Solid-Suit Jump Rebids & Slam Evaluation:** In a `2/1` Game Forcing auction (`1D–2C`, `1M–2m`), **jump rebid (`3m`/`3M`)** with a **solid/semi-solid `6–7+` card self-sufficient suit** (e.g., `AKJTxx+`, `AKQxxx+`) to announce running tricks and slam potential rather than rebidding softly at the 2-level. Opposite an opener who has rebid their minor twice (`1D–2C–2D–3C–3D` or `1D–2C–3D`), do **NOT** abruptly sign off in `3NT` with **`15+` HCP and your own solid `6–7` card suit** — count total trick sources (`12+` tricks!) and explore **`6m`/`6NT`** via `4m`, cuebid, or `4NT`.
 - **Reverse Discipline Opposite a Passed Hand:** When responder is a **passed hand** after `1C–(P)–1H–(1S)–?`, rebid **`1NT`** economically on a **`15–16` HCP** semi-balanced `5-4-2-2` hand holding a positional spade stopper (`Kx`) rather than forcing to the 3-level with a **`2D` reverse** (reserve `2D` reverses for **`17+` HCP** unbalanced distributional hands).
+- **Advancing Partner's 2-Level Overcall After Enemy Raise (`(1S)–2H–(2S)–?`):** Holding a **limit+ raise (`10+` dummy points including shortness, `3+` card trump support)** after opponents open and raise their suit, **cuebid opponents' suit (`3S`)** (or `2NT` invitational raise) to show constructive/game-invitational strength instead of a weak competitive `3H` raise (reserve direct `3H` for `6–9` dummy points). Also prefer a balancing **takeout double (`Dbl`)** in pass-out seat over `1C–(P)–1S–(P)–(P)–?` holding opening strength (`12+` HCP) and short spades (`<= 2` cards).
