@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 import pyspiel
 
@@ -22,10 +23,17 @@ from tenace.layer3_rules import (
     RuleDDSEvaluator,
     RuleFactTracker,
     collapse_equivalent_actions,
+    trick_winner,
 )
 from tenace.models.clients import StructuredModelClient
 
-__all__ = ["TenaceAgent", "extract_recommended_auction_action"]
+__all__ = [
+    "TenaceAgent",
+    "extract_recommended_auction_action",
+    "extract_recommended_play_action",
+]
+
+_CARD_TOKEN_RE = re.compile(r"\b([CDHS]):([2-9TJQKA])\b", flags=re.IGNORECASE)
 
 _CONTRACT_BID_CMD_RE = re.compile(
     r"^(?:bid|open|respond(?:\s+with)?|rebid|overcall|raise(?:\s+to)?|jump(?:\s+to)?|"
@@ -76,6 +84,54 @@ def extract_recommended_auction_action(
     if _OR_ALT_BID_RE.match(tail) is not None:
         return None
     return by_label.get(label_key)
+
+
+def extract_recommended_play_action(
+    plan_summary: str,
+    candidates: list[CandidateOption],
+) -> int | None:
+    """Parse a leading canonical card token (e.g. 'Lead D:K ...') from a live L1 play plan."""
+    text = plan_summary.strip()
+    if not text or not candidates:
+        return None
+    first_sentence = text.split(".", 1)[0]
+    m = _CARD_TOKEN_RE.search(first_sentence)
+    if m is None:
+        return None
+    from tenace.domain.types import action_label
+
+    token = f"{m.group(1).upper()}:{m.group(2).upper()}"
+    for cand in candidates:
+        if cand.label.upper() == token:
+            return cand.action
+        for eq_act in cand.equivalent_actions:
+            if action_label(eq_act).upper() == token:
+                return cand.action
+    return None
+
+
+def _partner_winning_trick_card(facts: Any, acting_seat: Seat) -> int | None:
+    """If in 4th seat of an active trick and partner/dummy is already winning it, return that card."""
+    if facts.phase != "play" or facts.declarer is None or not facts.played_cards:
+        return None
+    played = facts.played_cards
+    num_full = len(played) // 4
+    in_trick = played[num_full * 4 :]
+    if len(in_trick) != 3:
+        return None
+    leader = Seat((int(facts.declarer) + 1) % 4)
+    for t_idx in range(num_full):
+        chunk = played[t_idx * 4 : (t_idx + 1) * 4]
+        plays = [(Seat((int(leader) + o) % 4), c) for o, c in enumerate(chunk)]
+        leader = trick_winner(plays, facts.trump_denom)
+    partial = [(Seat((int(leader) + o) % 4), c) for o, c in enumerate(in_trick)]
+    winning_seat = trick_winner(partial, facts.trump_denom)
+    if winning_seat.partnership != acting_seat.partnership:
+        return None
+    for s_p, c_p in partial:
+        if s_p == winning_seat:
+            return c_p
+    return None
 
 
 class TenaceAgent:
@@ -255,12 +311,28 @@ class TenaceAgent:
         assert self.strategy is not None
 
         # Layer 3 Constrained DDS Scoring
+        card_system_id = self.strategist.convention_card.id
         scored_candidates = self.dds_evaluator.score_candidates(
             state,
             self.seat,
             candidates,
             strategy=self.strategy,
+            system_id=card_system_id,
         )
+
+        # Post-dummy 0-LLM DDS fast path: once dummy is seen and Trick 2 has completed,
+        # if Layer-3 exact constrained DDS leaves literally ONE card passing BOTH
+        # `max_make_prob_drop` and `max_ev_drop`, no L2 option score can overturn it.
+        if (
+            facts.phase == "play"
+            and len(facts.played_cards) >= 8
+            and self._dummy_seen
+            and not strategy_updated_this_turn
+        ):
+            unique_play = self.dds_evaluator.unique_viable_play_action(scored_candidates)
+            if unique_play is not None:
+                self.forced_moves += 1
+                return unique_play
 
         # Layer 2 Tactical Evaluation
         decision = self.evaluator.evaluate(
@@ -299,6 +371,7 @@ class TenaceAgent:
                 self.seat,
                 candidates,
                 strategy=self.strategy,
+                system_id=card_system_id,
             )
             decision = self.evaluator.evaluate(
                 facts,
@@ -307,17 +380,50 @@ class TenaceAgent:
             )
             self.evaluator_calls += 1
 
-        # Layer 3 Guarded Selection (strict make_prob blunder gate applies during card play;
-        # auction selection trusts Layer-2 partnership bidding scores without pass-out DDS bias,
-        # breaking near-ties with a freshly planned Layer-1 recommendation when unambiguous)
-        preferred_action = (
-            extract_recommended_auction_action(self.strategy.plan_summary, scored_candidates)
-            if facts.phase == "auction" and strategy_updated_this_turn
-            else None
-        )
+        # Layer 3 Guarded Selection:
+        # - Auction: trust Layer-2 partnership scores without pass-out DDS bias, breaking
+        #   near-ties with an unambiguous freshly planned Layer-1 call directive.
+        # - Opening lead (Trick 1, 39 unseen cards): break tight DDS ties with L1 directive.
+        # - Post-dummy play (26 unseen cards): let constrained C++ DDS EV lead cleanly,
+        #   preventing noisy LLM scores from overturning real minimax trick edges, and
+        #   never wastefully overtake dummy/partner's already-winning card in 4th seat.
+        if facts.phase == "auction":
+            preferred_action = (
+                extract_recommended_auction_action(self.strategy.plan_summary, scored_candidates)
+                if strategy_updated_this_turn
+                else None
+            )
+            return self.dds_evaluator.select_guarded_action(
+                scored_candidates,
+                decision,
+                phase="auction",
+                preferred_action=preferred_action,
+            )
+
+        is_opening_lead = len(facts.played_cards) == 0
+        if is_opening_lead:
+            lead_pref = (
+                extract_recommended_play_action(self.strategy.plan_summary, scored_candidates)
+                if strategy_updated_this_turn
+                else None
+            )
+            return self.dds_evaluator.select_guarded_action(
+                scored_candidates,
+                decision,
+                phase="play",
+                preferred_action=lead_pref,
+                play_preferred_ev_margin=45.0,
+                play_preferred_mp_margin=0.10,
+                play_ev_weight=0.55,
+                play_ev_scale=40.0,
+            )
+
+        partner_win_card = _partner_winning_trick_card(facts, self.seat)
         return self.dds_evaluator.select_guarded_action(
             scored_candidates,
             decision,
-            phase=facts.phase,
-            preferred_action=preferred_action,
+            phase="play",
+            play_ev_weight=0.82,
+            play_ev_scale=35.0,
+            partner_winning_trick_card=partner_win_card,
         )

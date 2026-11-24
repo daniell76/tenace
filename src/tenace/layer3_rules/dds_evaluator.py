@@ -33,6 +33,7 @@ from tenace.layer3_rules.tracker import trick_winner
 
 __all__ = [
     "RuleDDSEvaluator",
+    "infer_symbolic_auction_constraints",
     "score_bridge_contract",
     "solve_play_world_scores",
 ]
@@ -357,11 +358,14 @@ def _dealt_hand(world: pyspiel.State, seat: Seat) -> list[int]:
     return [dealt[4 * r + seat_idx].action for r in range(13)]
 
 
-def _matches_constraint(cards: list[int], constraint: SeatConstraint) -> bool:
-    """Enforces hard HCP and suit-length bounds; likely_cards stays a soft Strategist hint."""
+def _constraint_penalty(cards: list[int], constraint: SeatConstraint) -> float:
+    """Return 0.0 if `cards` satisfy hard HCP/suit-length bounds, else soft violation distance."""
+    penalty = 0.0
     hcp = hand_hcp(cards)
-    if not (constraint.min_hcp <= hcp <= constraint.max_hcp):
-        return False
+    if hcp < constraint.min_hcp:
+        penalty += float(constraint.min_hcp - hcp)
+    elif hcp > constraint.max_hcp:
+        penalty += float(hcp - constraint.max_hcp)
 
     if constraint.min_suit_lengths or constraint.max_suit_lengths:
         counts: dict[Suit, int] = {s: 0 for s in Suit}
@@ -369,12 +373,327 @@ def _matches_constraint(cards: list[int], constraint: SeatConstraint) -> bool:
             counts[card_suit(c)] += 1
         for suit, min_len in constraint.min_suit_lengths.items():
             if counts[suit] < min_len:
-                return False
+                penalty += 4.0 * float(min_len - counts[suit])
         for suit, max_len in constraint.max_suit_lengths.items():
             if counts[suit] > max_len:
-                return False
+                penalty += 4.0 * float(counts[suit] - max_len)
+    return penalty
 
-    return True
+
+def _matches_constraint(cards: list[int], constraint: SeatConstraint) -> bool:
+    """Enforces hard HCP and suit-length bounds; likely_cards stays a soft Strategist hint."""
+    return _constraint_penalty(cards, constraint) == 0.0
+
+
+def infer_symbolic_auction_constraints(
+    state: pyspiel.State,
+    observer: Seat,
+    system_id: str = "sayc",
+) -> dict[Seat, SeatConstraint]:
+    """Infer conservative HCP and suit-length bounds strictly from public auction calls.
+
+    FAIR-PLAY INVARIANT: Inspects ONLY `state.full_history()[NUM_CARDS:]` (public calls),
+    never touching dealt card identities `[:NUM_CARDS]`. Excludes `observer` and any visible dummy.
+    """
+    observer = Seat(observer)
+    visible_dummy = _visible_dummy_seat(state)
+    sys_key = (system_id or "sayc").strip().lower()
+    is_precision = sys_key == "precision"
+    is_polish = sys_key == "polish_club"
+    is_acol = sys_key == "acol"
+
+    public_history = state.full_history()[NUM_CARDS:]
+    calls: list[tuple[Seat, int]] = []
+    for entry in public_history:
+        if entry.action >= BIDDING_ACTION_BASE:
+            calls.append((Seat(entry.player), int(entry.action)))
+        else:
+            break
+
+    min_hcp: dict[Seat, int] = {s: 0 for s in Seat}
+    max_hcp: dict[Seat, int] = {s: 37 for s in Seat}
+    min_len: dict[Seat, dict[Suit, int]] = {s: {} for s in Seat}
+
+    opening_bid: tuple[Seat, int, int, int] | None = None  # (seat, call_idx, level, denom)
+    opener_side_bid_nt = False
+    is_weak_preempt_open = False
+    partner_raised_open_suit = False
+    passed_before_open: set[Seat] = set()
+    first_action_seen: set[Seat] = set()
+    non_pass_bid_seen: set[Seat] = set()
+    last_contract_denom_by_side: dict[int, set[int]] = {0: set(), 1: set()}
+    doubled_opening_seat: set[Seat] = set()
+    last_contract_bid: tuple[Seat, int, int] | None = None  # (seat, level, denom)
+    passes_since_bid = 0
+    side_has_contract_bid: dict[int, bool] = {0: False, 1: False}
+    pending_double: tuple[Seat, int, int, int, bool] | None = None  # (doubler, level, denom, passes_since, is_takeout)
+    pending_4nt_side: int | None = None
+
+    for idx, (seat, act) in enumerate(calls):
+        side = seat.partnership
+        if act == PASS_ACTION:
+            passes_since_bid += 1
+            if pending_double is not None:
+                dbl_seat, dbl_lvl, dbl_denom, dbl_passes, is_to = pending_double
+                if (
+                    is_to
+                    and seat == dbl_seat.partner
+                    and dbl_passes == 1
+                    and dbl_lvl <= 3
+                    and dbl_denom < 4
+                ):
+                    # Passed partner's takeout/reopening double for penalty -> trump stack!
+                    dbl_suit = Suit(dbl_denom)
+                    min_len[seat][dbl_suit] = max(min_len[seat].get(dbl_suit, 0), 4)
+                pending_double = (dbl_seat, dbl_lvl, dbl_denom, dbl_passes + 1, is_to)
+
+            if opening_bid is None:
+                # Unopened 1st/2nd/3rd seat pass -> below opening strength
+                if idx < 3:
+                    max_hcp[seat] = min(max_hcp[seat], 12)
+                passed_before_open.add(seat)
+            else:
+                open_seat, open_idx, open_lvl, open_denom = opening_bid
+                # Uncontested pass directly facing partner's 1-level natural opening
+                if (
+                    seat == open_seat.partner
+                    and idx == open_idx + 2
+                    and calls[open_idx + 1][1] == PASS_ACTION
+                    and open_lvl == 1
+                    and open_denom < 4
+                    and not (open_denom == 0 and (is_precision or is_polish))
+                ):
+                    max_hcp[seat] = min(max_hcp[seat], 6)
+            first_action_seen.add(seat)
+            continue
+
+        if act == DBL_ACTION:
+            if last_contract_bid is not None:
+                bid_seat, bid_lvl, bid_denom = last_contract_bid
+                if bid_seat.partnership != side and bid_lvl <= 3 and bid_denom < 4:
+                    # Reopening/balancing double (after 2 passes: e.g. 1H - 2D - P - P - X)
+                    # OR direct takeout double when doubler's side has NOT yet made a bid.
+                    is_reopening = passes_since_bid == 2
+                    is_fresh_takeout = passes_since_bid == 0 and not side_has_contract_bid[side]
+                    is_takeout = is_reopening or is_fresh_takeout
+                    pending_double = (seat, bid_lvl, bid_denom, 0, is_takeout)
+                    if not is_takeout and passes_since_bid == 0 and bid_lvl <= 2:
+                        # Direct-seat penalty double after our side already bid: doubler holds trumps.
+                        min_len[seat][Suit(bid_denom)] = max(
+                            min_len[seat].get(Suit(bid_denom), 0), 4
+                        )
+                else:
+                    pending_double = None
+            passes_since_bid = 0
+            if opening_bid is not None and seat not in non_pass_bid_seen:
+                open_seat, open_idx, open_lvl, _ = opening_bid
+                if open_seat.partnership != side and open_lvl <= 2:
+                    min_hcp[seat] = max(min_hcp[seat], 11)
+                    doubled_opening_seat.add(seat)
+            first_action_seen.add(seat)
+            non_pass_bid_seen.add(seat)
+            continue
+
+        if act == RDBL_ACTION:
+            pending_double = None
+            passes_since_bid = 0
+            first_action_seen.add(seat)
+            non_pass_bid_seen.add(seat)
+            continue
+
+        if FIRST_CONTRACT_BID_ACTION <= act <= MAX_ACTION:
+            pending_double = None
+            passes_since_bid = 0
+            offset = act - FIRST_CONTRACT_BID_ACTION
+            level = 1 + offset // 5
+            denom = offset % 5  # 0=C, 1=D, 2=H, 3=S, 4=NT
+            suit_enum = Suit(denom) if denom < 4 else None
+            is_rkcb_answer = (
+                pending_4nt_side == side and level == 5 and denom in (0, 1, 2, 3)
+            )
+            if is_rkcb_answer:
+                # 5C/5D/5H/5S answer to partner's 4NT keycard ask is artificial; do NOT assign suit length.
+                pending_4nt_side = None
+                last_contract_bid = (seat, level, denom)
+                side_has_contract_bid[side] = True
+                first_action_seen.add(seat)
+                non_pass_bid_seen.add(seat)
+                continue
+
+            if opening_bid is None:
+                opening_bid = (seat, idx, level, denom)
+                if level == 1:
+                    if denom == 4:  # 1NT
+                        opener_side_bid_nt = True
+                        if is_acol:
+                            min_hcp[seat] = max(min_hcp[seat], 11)
+                            max_hcp[seat] = min(max_hcp[seat], 15)
+                        elif is_precision:
+                            min_hcp[seat] = max(min_hcp[seat], 12)
+                            max_hcp[seat] = min(max_hcp[seat], 16)
+                        else:
+                            min_hcp[seat] = max(min_hcp[seat], 14)
+                            max_hcp[seat] = min(max_hcp[seat], 18)
+                    elif denom == 0 and is_precision:
+                        min_hcp[seat] = max(min_hcp[seat], 16)
+                    elif denom == 0 and is_polish:
+                        min_hcp[seat] = max(min_hcp[seat], 11)
+                    else:
+                        min_hcp[seat] = max(min_hcp[seat], 10 if idx >= 2 else 11)
+                        if is_precision:
+                            max_hcp[seat] = min(max_hcp[seat], 16)
+                        elif is_polish:
+                            max_hcp[seat] = min(max_hcp[seat], 18)
+                        if suit_enum is not None:
+                            if denom in (2, 3):  # 1H/1S
+                                min_len[seat][suit_enum] = max(
+                                    min_len[seat].get(suit_enum, 0), 4 if is_acol else 5
+                                )
+                            elif denom == 1 and not is_precision:
+                                min_len[seat][suit_enum] = max(
+                                    min_len[seat].get(suit_enum, 0), 3
+                                )
+                elif level == 2:
+                    if denom == 4:  # 2NT
+                        opener_side_bid_nt = True
+                        min_hcp[seat] = max(min_hcp[seat], 19)
+                        max_hcp[seat] = min(max_hcp[seat], 22)
+                    elif denom == 0:
+                        if is_precision or is_polish:
+                            min_hcp[seat] = max(min_hcp[seat], 10)
+                            max_hcp[seat] = min(max_hcp[seat], 16)
+                            min_len[seat][Suit.CLUBS] = max(min_len[seat].get(Suit.CLUBS, 0), 5)
+                        else:
+                            min_hcp[seat] = max(min_hcp[seat], 19)
+                    elif suit_enum is not None and not (denom == 1 and (is_precision or is_polish)):
+                        # Weak two 2D/2H/2S (conservative 5+ suit, 4..12 HCP)
+                        is_weak_preempt_open = True
+                        min_hcp[seat] = max(min_hcp[seat], 4)
+                        max_hcp[seat] = min(max_hcp[seat], 12)
+                        min_len[seat][suit_enum] = max(min_len[seat].get(suit_enum, 0), 5)
+                elif level == 3 and suit_enum is not None:
+                    is_weak_preempt_open = True
+                    min_hcp[seat] = max(min_hcp[seat], 3)
+                    max_hcp[seat] = min(max_hcp[seat], 12)
+                    min_len[seat][suit_enum] = max(min_len[seat].get(suit_enum, 0), 6)
+                elif level == 4 and suit_enum is not None:
+                    is_weak_preempt_open = True
+                    min_hcp[seat] = max(min_hcp[seat], 3)
+                    max_hcp[seat] = min(max_hcp[seat], 12)
+                    min_len[seat][suit_enum] = max(min_len[seat].get(suit_enum, 0), 7)
+            else:
+                open_seat, open_idx, open_lvl, open_denom = opening_bid
+                opp_side = 1 - side
+                is_opp_cuebid = denom < 4 and denom in last_contract_denom_by_side[opp_side]
+                if level == 4 and denom == 4:
+                    # 4NT keycard / quantitative slam bid
+                    pending_4nt_side = side
+                    if seat.partnership == open_seat.partnership and is_weak_preempt_open and seat == open_seat.partner:
+                        min_hcp[seat] = max(min_hcp[seat], 16)
+                    elif seat.partnership == open_seat.partnership:
+                        min_hcp[seat] = max(min_hcp[seat], 13)
+                elif seat.partnership != open_seat.partnership:
+                    # First free defensive bid over opponent opening (also applies to passed hands!)
+                    if seat not in non_pass_bid_seen and not is_opp_cuebid:
+                        if level == 1 and denom == 4:  # 1NT overcall
+                            min_hcp[seat] = max(min_hcp[seat], 14)
+                            max_hcp[seat] = min(max_hcp[seat], 18)
+                        elif level == 1 and suit_enum is not None:
+                            min_hcp[seat] = max(min_hcp[seat], 7)
+                            min_len[seat][suit_enum] = max(min_len[seat].get(suit_enum, 0), 4)
+                        elif level == 2 and suit_enum is not None and open_lvl == 1:
+                            if not (denom in (0, 1) and open_denom == 4):
+                                min_hcp[seat] = max(min_hcp[seat], 5)
+                                min_len[seat][suit_enum] = max(
+                                    min_len[seat].get(suit_enum, 0), 5
+                                )
+                        elif level == 3 and suit_enum is not None and not opener_side_bid_nt:
+                            # Advancing partner's takeout double / 3-level jump/overcall in a natural suit
+                            min_len[seat][suit_enum] = max(min_len[seat].get(suit_enum, 0), 4)
+                    elif (
+                        level == 3
+                        and suit_enum is not None
+                        and not is_opp_cuebid
+                        and not opener_side_bid_nt
+                    ):
+                        if open_seat.partner != seat and denom < 4:
+                            min_len[seat][suit_enum] = max(min_len[seat].get(suit_enum, 0), 4)
+                    if level == 3 and denom == 4 and seat in doubled_opening_seat:
+                        # Double then jump/bid 3NT shows a strong hand (15+ HCP)
+                        min_hcp[seat] = max(min_hcp[seat], 15)
+                else:
+                    # Responder to opening bid (natural non-artificial slots — applies to passed hands too!)
+                    if (
+                        seat == open_seat.partner
+                        and seat not in non_pass_bid_seen
+                        and not opener_side_bid_nt
+                        and open_lvl == 1
+                        and not (open_denom == 0 and (is_precision or is_polish))
+                    ):
+                        if level == 1 and suit_enum is not None:
+                            min_hcp[seat] = max(min_hcp[seat], 5)
+                            min_len[seat][suit_enum] = max(min_len[seat].get(suit_enum, 0), 4)
+                        elif level == 2 and suit_enum is not None and denom != open_denom and not is_opp_cuebid:
+                            min_hcp[seat] = max(min_hcp[seat], 10 if (open_denom == 3 and denom == 2) else 9)
+                            req_len = 5 if (open_denom == 3 and denom == 2 and not is_acol) else 4
+                            min_len[seat][suit_enum] = max(min_len[seat].get(suit_enum, 0), req_len)
+                    if (
+                        seat == open_seat.partner
+                        and open_lvl == 1
+                        and open_denom in (2, 3)
+                        and denom == open_denom
+                        and level in (2, 3, 4)
+                    ):
+                        partner_raised_open_suit = True
+                        min_len[seat][Suit(open_denom)] = max(
+                            min_len[seat].get(Suit(open_denom), 0), 3
+                        )
+                    if (
+                        seat == open_seat
+                        and open_lvl == 2
+                        and open_denom == 0
+                        and not (is_precision or is_polish)
+                        and level == 2
+                        and denom == 4
+                    ):
+                        min_hcp[seat] = max(min_hcp[seat], 20)
+                        max_hcp[seat] = min(max_hcp[seat], 26)
+                    if (
+                        seat == open_seat
+                        and level == 2
+                        and denom == open_denom
+                        and suit_enum is not None
+                        and open_lvl == 1
+                        and not partner_raised_open_suit
+                    ):
+                        req_reb = 6 if (open_denom in (2, 3) and not is_acol) else 5
+                        min_len[seat][suit_enum] = max(min_len[seat].get(suit_enum, 0), req_reb)
+
+            if denom < 4:
+                last_contract_denom_by_side[side].add(denom)
+            side_has_contract_bid[side] = True
+            last_contract_bid = (seat, level, denom)
+            first_action_seen.add(seat)
+            non_pass_bid_seen.add(seat)
+
+    result: dict[Seat, SeatConstraint] = {}
+    for seat in Seat:
+        if seat == observer or seat == visible_dummy:
+            continue
+        lo = min_hcp[seat]
+        hi = max_hcp[seat]
+        if lo > hi:
+            # Passed hand that later overcalled/bid aggressively: relax upper bound softly.
+            hi = max(lo, 14)
+        lens = min_len[seat]
+        if lo > 0 or hi < 37 or lens:
+            result[seat] = SeatConstraint(
+                seat=seat,
+                min_hcp=lo,
+                max_hcp=hi,
+                min_suit_lengths=lens,
+            )
+    return result
 
 
 class RuleDDSEvaluator:
@@ -417,50 +736,103 @@ class RuleDDSEvaluator:
         state: pyspiel.State,
         observer: Seat,
         strategy: StrategyState | None = None,
+        *,
+        target_worlds: int | None = None,
+        system_id: str | None = None,
     ) -> list[pyspiel.State]:
-        """Samples infostate worlds enforcing hard HCP/suit-length bounds (likely_cards stays soft)."""
+        """Samples infostate worlds ranked by soft HCP/suit-length constraint fit."""
         observer = Seat(observer)
         if state.current_phase() == 0:
             raise ValueError("Cannot sample worlds during incomplete deal phase")
 
-        active_constraints: list[tuple[Seat, SeatConstraint]] = []
-        if strategy is not None and strategy.seat_constraints:
-            visible_dummy = _visible_dummy_seat(state)
-            for seat_key, constraint in strategy.seat_constraints.items():
-                target_seat = Seat(seat_key)
-                if target_seat == observer or target_seat == visible_dummy:
-                    continue
-                active_constraints.append((target_seat, constraint))
+        desired = self.num_worlds if target_worlds is None else max(1, int(target_worlds))
+        visible_dummy = _visible_dummy_seat(state)
+        l1_constraints = strategy.seat_constraints if strategy is not None else None
+        symbolic: dict[Seat, SeatConstraint] = (
+            infer_symbolic_auction_constraints(state, observer, system_id=system_id)
+            if (state.current_phase() == 2 and system_id is not None)
+            else {}
+        )
+        symbolic_items = sorted(
+            (
+                (seat, c)
+                for seat, c in symbolic.items()
+                if seat != observer and seat != visible_dummy
+            ),
+            key=lambda item: int(item[0]),
+        )
+        l1_items: list[tuple[Seat, SeatConstraint]] = []
+        if l1_constraints:
+            for seat_key, c in sorted(l1_constraints.items(), key=lambda item: int(Seat(item[0]))):
+                target = Seat(seat_key)
+                if target != observer and target != visible_dummy:
+                    l1_items.append((target, c))
 
-        if not active_constraints:
+        if not symbolic_items and not l1_items:
             return [
                 state.resample_from_infostate(int(observer), self._rng.random)
-                for _ in range(self.num_worlds)
+                for _ in range(desired)
             ]
 
-        accepted: list[pyspiel.State] = []
-        fallbacks: list[pyspiel.State] = []
-        max_attempts = self.num_worlds * self.max_rejection_factor
+        is_play = state.current_phase() == 2
+        if is_play:
+            if visible_dummy is None:
+                max_attempts = max(desired * self.max_rejection_factor, min(desired * 64, 2400))
+            else:
+                max_attempts = max(desired * self.max_rejection_factor, min(desired * 48, 1200))
+        else:
+            max_attempts = desired * self.max_rejection_factor
 
-        for _ in range(max_attempts):
+        # Weight verified public-auction symbolic constraints strictly heavier than noisy L1
+        # estimates so an overtight L1 HCP guess (e.g. guessing 19-22 when only 14 remain)
+        # can NEVER override a known suit length (e.g. 1S response = 4+ spades) or collapse
+        # all worlds into a single degenerate corner!
+        l1_weight = 0.35 if symbolic_items else 1.0
+        exact: list[pyspiel.State] = []
+        near_matches: list[tuple[float, int, pyspiel.State]] = []
+
+        for draw_idx in range(max_attempts):
             world = state.resample_from_infostate(int(observer), self._rng.random)
-            if all(
-                _matches_constraint(_dealt_hand(world, seat), constraint)
-                for seat, constraint in active_constraints
-            ):
-                accepted.append(world)
-                if len(accepted) >= self.num_worlds:
-                    return accepted
-            elif len(fallbacks) < self.num_worlds:
-                fallbacks.append(world)
+            sym_pen = sum(
+                _constraint_penalty(_dealt_hand(world, seat), constraint)
+                for seat, constraint in symbolic_items
+            )
+            l1_pen = sum(
+                _constraint_penalty(_dealt_hand(world, seat), constraint)
+                for seat, constraint in l1_items
+            )
+            if sym_pen == 0.0 and l1_pen == 0.0:
+                exact.append(world)
+                if len(exact) >= desired:
+                    return exact
+            else:
+                # Combined Bayesian soft energy + mild random tie-break/temperature to preserve
+                # realistic world diversity across near-feasible deals instead of mode collapse.
+                energy = (2.0 * sym_pen) + (l1_weight * l1_pen)
+                near_matches.append((energy, draw_idx, world))
 
-        needed = self.num_worlds - len(accepted)
-        accepted.extend(fallbacks[:needed])
-        while len(accepted) < self.num_worlds:
-            accepted.append(
+        # Boltzmann-style soft ordering: add bounded Gumbel noise only when ranking near-matches
+        # so exact/strong symbolic worlds still dominate without pinning 16/16 identical hands.
+        temp = 0.6 if symbolic_items else 0.0
+        if temp > 0.0 and near_matches:
+            def _soft_key(item: tuple[float, int, pyspiel.State]) -> float:
+                u = max(1e-9, min(1.0 - 1e-9, self._rng.random()))
+                gumbel = -math.log(-math.log(u))
+                return item[0] - temp * gumbel
+
+            scored_near = [(_soft_key(it), it[1], it[2]) for it in near_matches]
+            scored_near.sort(key=lambda item: (item[0], item[1]))
+            needed = desired - len(exact)
+            exact.extend(world for _k, _idx, world in scored_near[:needed])
+        else:
+            near_matches.sort(key=lambda item: (item[0], item[1]))
+            needed = desired - len(exact)
+            exact.extend(world for _p, _idx, world in near_matches[:needed])
+        while len(exact) < desired:
+            exact.append(
                 state.resample_from_infostate(int(observer), self._rng.random)
             )
-        return accepted
+        return exact
 
     def _rollout_value(
         self,
@@ -498,12 +870,33 @@ class RuleDDSEvaluator:
         observer: Seat,
         candidates: list[CandidateOption],
         strategy: StrategyState | None = None,
+        *,
+        system_id: str | None = None,
+        target_worlds: int | None = None,
     ) -> list[CandidateOption]:
         observer = Seat(observer)
         if len(candidates) <= 1:
             return list(candidates)
 
-        worlds = self.sample_consistent_worlds(state, observer, strategy)
+        is_play_opening_lead = (
+            state.current_phase() == 2
+            and _visible_dummy_seat(state) is None
+            and not any(c.action >= BIDDING_ACTION_BASE for c in candidates)
+        )
+        effective_worlds = target_worlds
+        if effective_worlds is None and is_play_opening_lead and self.num_worlds >= 4:
+            effective_worlds = min(self.num_worlds * 3, 48)
+
+        if target_worlds is None and system_id is None and effective_worlds is None:
+            worlds = self.sample_consistent_worlds(state, observer, strategy)
+        else:
+            worlds = self.sample_consistent_worlds(
+                state,
+                observer,
+                strategy,
+                target_worlds=effective_worlds,
+                system_id=system_id,
+            )
         world_seeds = [self._rng.getrandbits(64) for _ in worlds]
         obs_idx = int(observer)
 
@@ -589,6 +982,45 @@ class RuleDDSEvaluator:
             )
         return scored
 
+    def unique_viable_play_action(
+        self,
+        candidates: list[CandidateOption],
+    ) -> int | None:
+        """Return the sole legal action surviving both make_prob & EV blunder gates, or None."""
+        if len(candidates) <= 1:
+            return candidates[0].action if candidates else None
+        probs = [
+            c.make_prob
+            for c in candidates
+            if c.make_prob is not None and math.isfinite(c.make_prob)
+        ]
+        if probs:
+            best_prob = max(probs)
+            threshold = best_prob - self.max_make_prob_drop
+            viable = [
+                c
+                for c in candidates
+                if c.make_prob is None
+                or not math.isfinite(c.make_prob)
+                or c.make_prob >= threshold - 1e-12
+            ]
+        else:
+            viable = list(candidates)
+        if len(viable) == 1:
+            return viable[0].action
+        if self.max_ev_drop is not None:
+            finite_evs = [float(c.baseline_ev) for c in viable if math.isfinite(c.baseline_ev)]
+            if finite_evs:
+                ev_cutoff = max(finite_evs) - self.max_ev_drop - 1e-9
+                gated = [
+                    c
+                    for c in viable
+                    if math.isfinite(c.baseline_ev) and float(c.baseline_ev) >= ev_cutoff
+                ]
+                if len(gated) == 1:
+                    return gated[0].action
+        return None
+
     def select_guarded_action(
         self,
         candidates: list[CandidateOption],
@@ -597,6 +1029,12 @@ class RuleDDSEvaluator:
         phase: Literal["play", "auction"] = "play",
         preferred_action: int | None = None,
         auction_tie_margin: float = 0.08,
+        play_preferred_ev_margin: float | None = None,
+        play_preferred_mp_margin: float | None = None,
+        play_ev_weight: float = 0.45,
+        play_ev_scale: float = 1.0,
+        partner_winning_trick_card: int | None = None,
+        overtake_ev_threshold: float = 15.0,
     ) -> int:
         if not candidates:
             raise ValueError("No legal candidates available")
@@ -668,14 +1106,70 @@ class RuleDDSEvaluator:
                 if gated_viable:
                     viable = gated_viable
 
+        # Fourth-seat partner/dummy-winning guard: avoid burning a higher honor on top
+        # of partner's already-winning trick unless DDS shows a genuine unblock/entry gain.
+        if partner_winning_trick_card is not None and 0 <= partner_winning_trick_card < NUM_CARDS:
+            win_suit = card_suit(partner_winning_trick_card)
+            win_rank = card_rank(partner_winning_trick_card)
+            under_cards = [
+                c
+                for c in viable
+                if 0 <= c.action < NUM_CARDS
+                and card_suit(c.action) == win_suit
+                and card_rank(c.action) < win_rank
+                and math.isfinite(c.baseline_ev)
+            ]
+            if under_cards:
+                best_under_ev = max(float(c.baseline_ev) for c in under_cards)
+                non_wasteful = [
+                    c
+                    for c in viable
+                    if not (
+                        0 <= c.action < NUM_CARDS
+                        and card_suit(c.action) == win_suit
+                        and card_rank(c.action) > win_rank
+                        and math.isfinite(c.baseline_ev)
+                        and float(c.baseline_ev) <= best_under_ev + overtake_ev_threshold + 1e-9
+                    )
+                ]
+                if non_wasteful:
+                    viable = non_wasteful
+
+        # Opening-lead near-tie directive: when Layer-1 recommends a specific legal lead
+        # inside the tight constrained DDS margin (EV and optional make_prob gate),
+        # honor its single-dummy lead theory.
+        if preferred_action is not None and play_preferred_ev_margin is not None:
+            pref = next((c for c in viable if c.action == preferred_action), None)
+            finite_v = [float(c.baseline_ev) for c in viable if math.isfinite(c.baseline_ev)]
+            mp_ok = True
+            if play_preferred_mp_margin is not None and pref is not None:
+                finite_mp = [
+                    float(c.make_prob)
+                    for c in viable
+                    if c.make_prob is not None and math.isfinite(c.make_prob)
+                ]
+                if finite_mp and pref.make_prob is not None and math.isfinite(pref.make_prob):
+                    mp_ok = float(pref.make_prob) >= max(finite_mp) - play_preferred_mp_margin - 1e-12
+            if (
+                pref is not None
+                and mp_ok
+                and finite_v
+                and math.isfinite(pref.baseline_ev)
+                and float(pref.baseline_ev) >= max(finite_v) - play_preferred_ev_margin - 1e-9
+            ):
+                return pref.action
+
         finite_evs = [float(c.baseline_ev) for c in viable if math.isfinite(c.baseline_ev)]
         if finite_evs:
             ev_min = min(finite_evs)
             ev_max = max(finite_evs)
-            denom = max(ev_max - ev_min, 1.0)
+            denom = max(ev_max - ev_min, max(1.0, float(play_ev_scale)))
         else:
             ev_min = 0.0
-            denom = 1.0
+            denom = max(1.0, float(play_ev_scale))
+
+        w_ev = min(1.0, max(0.0, float(play_ev_weight)))
+        w_llm = 1.0 - w_ev
 
         def _blended_score(cand: CandidateOption) -> float:
             norm_ev = (
@@ -687,6 +1181,6 @@ class RuleDDSEvaluator:
             llm_score = (
                 min(1.0, max(0.0, float(raw))) if math.isfinite(raw) else 0.5
             )
-            return 0.45 * norm_ev + 0.55 * llm_score
+            return w_ev * norm_ev + w_llm * llm_score
 
         return max(viable, key=_blended_score).action

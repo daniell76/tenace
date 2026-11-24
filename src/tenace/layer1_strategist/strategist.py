@@ -66,6 +66,30 @@ def build_strategist_system_prompt(
         if convention_card.l1_auction_directive
         else DEFAULT_L1_AUCTION_DIRECTIVE
     )
+    play_guidance = (
+        "During PLAY (Opening Lead & Card Play):\n"
+        "- On the OPENING LEAD (dummy not yet revealed): start `plan_summary` with your single exact "
+        "recommended card token (e.g., 'Lead H:A ...' or 'Lead D:J ...').\n"
+        "- Solid AK(x) holding (BOTH Ace AND King!): against 3NT or high-level contracts, prioritize "
+        "leading A (or K) from AK(x) FIRST to inspect dummy while retaining the lead — especially when "
+        "declarer jumped directly to 3NT stopping your own weak suit (e.g., J98xxxx)! Conversely, "
+        "avoid leading an unsupported bare Ace (A-x-x without the King) against a 4/5-level suit "
+        "contract unless partner bid it or you urgently need a quick ruff/cash-out.\n"
+        "- Sequence leads: from a true touching 3-card honor sequence (KQJ/QJT/JT9), lead the top "
+        "honor. From an interior sequence (KJT(x), AJT(x), or QT9(x)), lead the TOP OF THE INTERIOR "
+        "SEQUENCE (`J` from KJT7 or AJT, `T` from QT9x) — NEVER lead the `K` from KJT7! From a "
+        "ragged 5-card suit missing the 9 (e.g., JT863), lead 4th-best low rather than the Jack.\n"
+        "- Lead partner's bid/overcalled suit in competitive auctions unless holding a solid AK(x) "
+        "or clear singleton ruff.\n"
+        "- After winning Tricks 1-2 on defense (e.g., AK), check for a singleton shift to score a "
+        "trump ruff whenever you still hold trump control or partner has an outside entry.\n"
+        "- NEVER overtake partner's or dummy's already-winning trick with a higher honor unless "
+        "unblocking or creating a mandatory entry to the opposite hand.\n"
+        "- Populate accurate `seat_constraints` (`min_hcp`, `max_hcp`, `min_suit_lengths`) for ALL "
+        "hidden seats using the public auction so the Layer-3 DDS sampler generates realistic hands.\n"
+        if phase == "play"
+        else f"{directive}\n"
+    )
     return (
         "You are Tenace Layer 1 Strategist, an expert Contract Bridge planner.\n"
         f"Partnership System: {convention_card.name}\n"
@@ -74,7 +98,7 @@ def build_strategist_system_prompt(
         f"{calibration_section}"
         "Synthesize a coherent multi-trick or multi-round StrategyState based ONLY on "
         "legal public information and your own visible cards.\n"
-        f"{directive}\n"
+        f"{play_guidance}"
         "Constraint syntax rules for `seat_constraints`:\n"
         "- Outer keys and inner `seat` values must use seat names: "
         '"NORTH", "EAST", "SOUTH", or "WEST".\n'
