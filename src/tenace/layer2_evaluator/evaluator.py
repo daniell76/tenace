@@ -10,6 +10,7 @@ from tenace.domain.types import (
 from tenace.layer1_strategist import (
     SAYC_CONVENTION_CARD,
     ConventionCard,
+    extract_defensive_carding_notes,
     format_auction_sequence,
     format_cards_by_suit,
     format_contract_summary,
@@ -85,9 +86,11 @@ class TacticalOptionEvaluator:
         self,
         client: StructuredModelClient,
         convention_card: ConventionCard = SAYC_CONVENTION_CARD,
+        opponent_convention_card: ConventionCard | None = None,
     ) -> None:
         self.client = client
         self.convention_card = convention_card
+        self.opponent_convention_card = opponent_convention_card
 
     def evaluate(
         self,
@@ -175,6 +178,19 @@ class TacticalOptionEvaluator:
                     f"Current Trick: {current_line}",
                 ]
             )
+            carding_notes = extract_defensive_carding_notes(facts)
+            if carding_notes:
+                user_lines.append(f"Carding Observations: {' | '.join(carding_notes)}")
+            if (
+                self.opponent_convention_card is not None
+                and (
+                    self.opponent_convention_card.id != self.convention_card.id
+                    or self.opponent_convention_card.summary_rules != self.convention_card.summary_rules
+                )
+            ):
+                user_lines.append(
+                    f"Opponent System: {self.opponent_convention_card.name}"
+                )
         user_lines.append("")
         if facts.phase == "auction":
             partner_has_acted = any(
@@ -204,6 +220,20 @@ class TacticalOptionEvaluator:
                 system_block.append(
                     f"Calibration Notes: {self.convention_card.calibration_notes}"
                 )
+            if self.opponent_convention_card is not None:
+                same_opp = (
+                    self.opponent_convention_card.id == self.convention_card.id
+                    and self.opponent_convention_card.summary_rules == self.convention_card.summary_rules
+                )
+                if same_opp:
+                    system_block.append(
+                        f"Opponent Disclosed System: Same as Partnership System ({self.opponent_convention_card.name})"
+                    )
+                else:
+                    system_block.append(
+                        f"Opponent Disclosed System: {self.opponent_convention_card.name} — "
+                        f"{self.opponent_convention_card.summary_rules}"
+                    )
             system_block.extend([discipline_line, ""])
             user_lines.extend(system_block)
         user_lines.extend(

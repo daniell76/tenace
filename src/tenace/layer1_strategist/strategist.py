@@ -25,6 +25,7 @@ __all__ = [
     "DEFAULT_L1_AUCTION_DIRECTIVE",
     "StrategistEngine",
     "build_strategist_system_prompt",
+    "extract_defensive_carding_notes",
     "format_auction_sequence",
     "format_cards_by_suit",
     "format_contract_summary",
@@ -48,6 +49,8 @@ DEFAULT_L1_AUCTION_DIRECTIVE = (
 def build_strategist_system_prompt(
     convention_card: ConventionCard,
     phase: str = "auction",
+    *,
+    opponent_convention_card: ConventionCard | None = None,
 ) -> str:
     """Render the exact Layer-1 Strategist system prompt for `convention_card` and `phase`."""
     detailed_section = ""
@@ -61,6 +64,21 @@ def build_strategist_system_prompt(
             f"Calibration Notes (Active Hill-Climb Refinements):\n"
             f"{convention_card.calibration_notes}\n\n"
         )
+    opponent_section = ""
+    if opponent_convention_card is not None:
+        same_card = (
+            opponent_convention_card.id == convention_card.id
+            and opponent_convention_card.summary_rules == convention_card.summary_rules
+        )
+        if same_card:
+            opponent_section = (
+                f"Opponent Disclosed System: Same as Partnership System ({opponent_convention_card.name})\n\n"
+            )
+        else:
+            opponent_section = (
+                f"Opponent Disclosed System: {opponent_convention_card.name}\n"
+                f"Opponent Summary (Public Convention Card): {opponent_convention_card.summary_rules}\n\n"
+            )
     directive = (
         convention_card.l1_auction_directive
         if convention_card.l1_auction_directive
@@ -84,12 +102,18 @@ def build_strategist_system_prompt(
         "- After winning Tricks 1-2 on defense (e.g., AK), check for a singleton shift to score a "
         "trump ruff whenever you still hold trump control or partner has an outside entry. "
         "Conversely, if partner wins Trick 1 against a suit contract and IMMEDIATELY switches to a "
-        "low card in a new side suit, read it as a probable singleton/ruff shift and return that "
-        "suit promptly before declarer draws trumps.\n"
+        "low card in a new side suit, read it as a probable singleton/ruff shift — set partner's "
+        "`max_suit_lengths[suit] = 1` in `seat_constraints` and return that suit promptly before "
+        "declarer draws trumps.\n"
+        "- Defensive Carding Signals: when following suit or discarding with touching spots, play a "
+        "HIGH spot to encourage or begin a high-low (even count), and a LOW spot to discourage or "
+        "show odd count (per the active system's carding agreement). Read partner's signals and "
+        "reflect inferred lengths in `seat_constraints` (`min_suit_lengths` / `max_suit_lengths`).\n"
         "- NEVER overtake partner's or dummy's already-winning trick with a higher honor unless "
         "unblocking or creating a mandatory entry to the opposite hand.\n"
-        "- Populate accurate `seat_constraints` (`min_hcp`, `max_hcp`, `min_suit_lengths`) for ALL "
-        "hidden seats using the public auction so the Layer-3 DDS sampler generates realistic hands.\n"
+        "- Populate accurate `seat_constraints` (`min_hcp`, `max_hcp`, `min_suit_lengths`, "
+        "`max_suit_lengths`) for ALL hidden seats using the public auction and defensive signals so "
+        "the Layer-3 DDS sampler generates realistic hands.\n"
         if phase == "play"
         else f"{directive}\n"
     )
@@ -99,6 +123,7 @@ def build_strategist_system_prompt(
         f"Convention Summary: {convention_card.summary_rules}\n\n"
         f"{detailed_section}"
         f"{calibration_section}"
+        f"{opponent_section}"
         "Synthesize a coherent multi-trick or multi-round StrategyState based ONLY on "
         "legal public information and your own visible cards.\n"
         f"{play_guidance}"
@@ -245,14 +270,101 @@ def format_play_state(facts: BoardFactSnapshot) -> tuple[str, str, str]:
     return tricks_won_line, completed_line, current_line
 
 
+def extract_defensive_carding_notes(facts: BoardFactSnapshot) -> list[str]:
+    """Extract deterministic public carding & defensive signal observations from completed tricks.
+
+    FAIR-PLAY INVARIANT: Uses strictly `facts.played_cards`, `facts.declarer`, and `facts.trump_denom`.
+    """
+    if facts.phase != "play" or facts.declarer is None or len(facts.played_cards) < 4:
+        return []
+
+    is_defender = facts.observer.partnership != facts.declarer.partnership
+    partner = facts.observer.partner
+    played = facts.played_cards
+    num_full = len(played) // 4
+    if num_full == 0:
+        return []
+
+    leader = Seat((int(facts.declarer) + 1) % 4)
+    trick_records: list[tuple[int, Seat, int, list[tuple[Seat, int]], Seat]] = []
+    # Track per-(seat, suit) following-suit spot plays for standard high-low / low-high count echoes
+    follow_spots: dict[tuple[Seat, Suit], list[int]] = defaultdict(list)
+
+    for t_idx in range(num_full):
+        cards = played[t_idx * 4 : (t_idx + 1) * 4]
+        plays = [(Seat((int(leader) + o) % 4), c) for o, c in enumerate(cards)]
+        led_card = cards[0]
+        led_suit = card_suit(led_card)
+        winner = trick_winner(plays, facts.trump_denom)
+        trick_records.append((t_idx + 1, leader, led_card, plays, winner))
+        for offset, (s_p, c_p) in enumerate(plays):
+            if offset > 0 and card_suit(c_p) == led_suit and card_rank(c_p) <= 8:
+                follow_spots[(s_p, led_suit)].append(c_p)
+        leader = winner
+
+    notes: list[str] = []
+    # 1. Detect early partner suit-switch (Trick 2 or 3) against a suit contract:
+    #    partner won Trick k in suit S1 and immediately led a new non-trump side suit S2!
+    if is_defender and facts.trump_denom is not None and facts.trump_denom < 4:
+        trump_suit = Suit(facts.trump_denom)
+        for i in range(1, min(len(trick_records), 3)):
+            prev_no, _prev_ldr, prev_led_card, _prev_plays, prev_win = trick_records[i - 1]
+            curr_no, curr_ldr, curr_led_card, _curr_plays, _curr_win = trick_records[i]
+            prev_suit = card_suit(prev_led_card)
+            curr_suit = card_suit(curr_led_card)
+            if (
+                prev_win == partner
+                and curr_ldr == partner
+                and curr_suit != prev_suit
+                and curr_suit != trump_suit
+            ):
+                low_tag = "low " if card_rank(curr_led_card) <= 6 else ""
+                notes.append(
+                    f"Partner {partner.name} won Trick {prev_no} ({prev_suit.name}) and "
+                    f"switched to {low_tag}{curr_suit.name} ({action_label(curr_led_card)}) "
+                    f"at Trick {curr_no} — potential singleton/short-suit ruff shift."
+                )
+
+    # 2. Detect standard high-low (even count) vs low-high (odd count) spot echoes
+    #    (prioritize partner's signals when defending, plus opponents' count signals).
+    seat_order = (
+        [partner, facts.declarer, facts.declarer.partner]
+        if is_defender
+        else [s for s in Seat if s != facts.observer and s != facts.dummy_seat]
+    )
+    for s_chk in seat_order:
+        if s_chk == facts.observer or s_chk == facts.dummy_seat:
+            continue
+        for suit in _SUIT_DISPLAY_ORDER:
+            seq = follow_spots.get((s_chk, suit), [])
+            if len(seq) >= 2:
+                c1, c2 = seq[0], seq[1]
+                r1, r2 = card_rank(c1), card_rank(c2)
+                role = "Partner " if s_chk == partner else ""
+                if r1 > r2:
+                    notes.append(
+                        f"{role}{s_chk.name} played high-low in {suit.name} "
+                        f"({action_label(c1)} then {action_label(c2)}) -> even count (standard carding)."
+                    )
+                elif r1 < r2:
+                    notes.append(
+                        f"{role}{s_chk.name} played low-high in {suit.name} "
+                        f"({action_label(c1)} then {action_label(c2)}) -> odd count (standard carding)."
+                    )
+
+    return notes[:4]
+
+
 class StrategistEngine:
     def __init__(
         self,
         client: StructuredModelClient,
         convention_card: ConventionCard = SAYC_CONVENTION_CARD,
+        opponent_convention_card: ConventionCard | None = None,
     ) -> None:
         self.client = client
         self.convention_card = convention_card
+        self.opponent_convention_card = opponent_convention_card
 
     def should_replan(
         self,
@@ -288,6 +400,7 @@ class StrategistEngine:
         system_prompt = build_strategist_system_prompt(
             self.convention_card,
             phase=facts.phase,
+            opponent_convention_card=self.opponent_convention_card,
         )
 
         dummy_line = (
@@ -325,6 +438,9 @@ class StrategistEngine:
                     f"Current Trick: {current_line}",
                 ]
             )
+            carding_notes = extract_defensive_carding_notes(facts)
+            if carding_notes:
+                lines.append(f"Carding Observations: {' | '.join(carding_notes)}")
         lines.extend(
             [
                 f"Auction Sequence: {format_auction_sequence(facts.auction_calls)}",

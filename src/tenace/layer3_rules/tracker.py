@@ -40,6 +40,8 @@ _OBS_VUL_RE = re.compile(r"^Vul:\s*(None|N/S|E/W|All)\s*$", re.MULTILINE)
 def collapse_equivalent_actions(
     legal_actions: list[int],
     played_cards: set[int] | None = None,
+    *,
+    preserve_signals: bool = False,
 ) -> list[CandidateOption]:
     if played_cards is not None and any(c < 0 or c >= NUM_CARDS for c in played_cards):
         raise ValueError("played_cards entries must be valid card IDs in [0, 51]")
@@ -90,14 +92,35 @@ def collapse_equivalent_actions(
 
         for grp in groups:
             ordered = sorted(grp, reverse=True)
-            rep = ordered[0]
-            options.append(
-                CandidateOption(
-                    action=rep,
-                    label=action_label(rep),
-                    equivalent_actions=ordered,
+            # When defending with signal preservation enabled, split touching spot groups
+            # (top card <= Ten, rank <= 8) into [highest, lowest] so defenders can signal
+            # attitude (high encourages / low discourages) and count (high-low = even).
+            if preserve_signals and len(ordered) >= 2 and card_rank(ordered[0]) <= 8:
+                hi = ordered[0]
+                lo = ordered[-1]
+                options.append(
+                    CandidateOption(
+                        action=hi,
+                        label=action_label(hi),
+                        equivalent_actions=ordered[:-1],
+                    )
                 )
-            )
+                options.append(
+                    CandidateOption(
+                        action=lo,
+                        label=action_label(lo),
+                        equivalent_actions=[lo],
+                    )
+                )
+            else:
+                rep = ordered[0]
+                options.append(
+                    CandidateOption(
+                        action=rep,
+                        label=action_label(rep),
+                        equivalent_actions=ordered,
+                    )
+                )
 
     return options
 

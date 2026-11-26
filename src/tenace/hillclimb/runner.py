@@ -160,6 +160,7 @@ class HillClimbEngine:
         eval_client: Any,
         seed: int,
         salt: int = 0,
+        opponent_card: ConventionCard | None = None,
     ) -> TenaceAgent:
         return TenaceAgent(
             seat=seat,
@@ -170,6 +171,7 @@ class HillClimbEngine:
                 rng_seed=(seed * 31) + int(seat) + salt,
             ),
             convention_card=card,
+            opponent_convention_card=opponent_card,
         )
 
     def _make_ref_bot(
@@ -180,6 +182,7 @@ class HillClimbEngine:
         team_ns: str,
         team_ew: str,
         ref_clients: tuple[Any, Any] | None = None,
+        opponent_card: ConventionCard | None = None,
     ) -> BridgeSeatBot:
         if self.opponent == "baseline":
             return FirstLegalPassBaselineBot(seat)
@@ -200,7 +203,13 @@ class HillClimbEngine:
 
         card = self.reference_card or SAYC_CONVENTION_CARD
         return self._make_tenace_bot(
-            seat, card, ref_clients[0], ref_clients[1], seed=seed, salt=100
+            seat,
+            card,
+            ref_clients[0],
+            ref_clients[1],
+            seed=seed,
+            salt=100,
+            opponent_card=opponent_card,
         )
 
     def evaluate_boards(
@@ -245,6 +254,14 @@ class HillClimbEngine:
 
         records: list[BoardTelemetryRecord] = []
 
+        from tenace.layer1_strategist import SAYC_CONVENTION_CARD
+
+        challenger_opp_card: ConventionCard | None = (
+            self.reference_card
+            if self.reference_card is not None
+            else (SAYC_CONVENTION_CARD if self.opponent == "tenace" else None)
+        )
+
         if mode == "controlled":
             uncached = [b for b in board_numbers if b not in cached_table_a]
             if uncached:
@@ -257,6 +274,7 @@ class HillClimbEngine:
                             team_ns="Ref_NS",
                             team_ew="Ref_EW",
                             ref_clients=ref_clients,
+                            opponent_card=challenger_opp_card,
                         )
                     for b in uncached:
                         bt0 = time.perf_counter()
@@ -279,10 +297,20 @@ class HillClimbEngine:
             table_b_seats: dict[Seat, BridgeSeatBot] = {}
             try:
                 table_b_seats[Seat.NORTH] = self._make_tenace_bot(
-                    Seat.NORTH, card, chal_clients[0], chal_clients[1], seed=seed
+                    Seat.NORTH,
+                    card,
+                    chal_clients[0],
+                    chal_clients[1],
+                    seed=seed,
+                    opponent_card=challenger_opp_card,
                 )
                 table_b_seats[Seat.SOUTH] = self._make_tenace_bot(
-                    Seat.SOUTH, card, chal_clients[0], chal_clients[1], seed=seed
+                    Seat.SOUTH,
+                    card,
+                    chal_clients[0],
+                    chal_clients[1],
+                    seed=seed,
+                    opponent_card=challenger_opp_card,
                 )
                 table_b_seats[Seat.EAST] = self._make_ref_bot(
                     Seat.EAST,
@@ -290,6 +318,7 @@ class HillClimbEngine:
                     team_ns=manifest.system_id,
                     team_ew="Ref_EW",
                     ref_clients=ref_clients,
+                    opponent_card=card,
                 )
                 table_b_seats[Seat.WEST] = self._make_ref_bot(
                     Seat.WEST,
@@ -297,6 +326,7 @@ class HillClimbEngine:
                     team_ns=manifest.system_id,
                     team_ew="Ref_EW",
                     ref_clients=ref_clients,
+                    opponent_card=card,
                 )
                 for b in board_numbers:
                     prev_l1 = (
@@ -362,28 +392,70 @@ class HillClimbEngine:
             closed_seats: dict[Seat, BridgeSeatBot] = {}
             try:
                 open_seats[Seat.NORTH] = self._make_tenace_bot(
-                    Seat.NORTH, card, chal_clients[0], chal_clients[1], seed=seed
+                    Seat.NORTH,
+                    card,
+                    chal_clients[0],
+                    chal_clients[1],
+                    seed=seed,
+                    opponent_card=challenger_opp_card,
                 )
                 open_seats[Seat.SOUTH] = self._make_tenace_bot(
-                    Seat.SOUTH, card, chal_clients[0], chal_clients[1], seed=seed
+                    Seat.SOUTH,
+                    card,
+                    chal_clients[0],
+                    chal_clients[1],
+                    seed=seed,
+                    opponent_card=challenger_opp_card,
                 )
                 open_seats[Seat.EAST] = self._make_ref_bot(
-                    Seat.EAST, seed=seed, team_ns=manifest.system_id, team_ew="Ref", ref_clients=ref_clients
+                    Seat.EAST,
+                    seed=seed,
+                    team_ns=manifest.system_id,
+                    team_ew="Ref",
+                    ref_clients=ref_clients,
+                    opponent_card=card,
                 )
                 open_seats[Seat.WEST] = self._make_ref_bot(
-                    Seat.WEST, seed=seed, team_ns=manifest.system_id, team_ew="Ref", ref_clients=ref_clients
+                    Seat.WEST,
+                    seed=seed,
+                    team_ns=manifest.system_id,
+                    team_ew="Ref",
+                    ref_clients=ref_clients,
+                    opponent_card=card,
                 )
                 closed_seats[Seat.NORTH] = self._make_ref_bot(
-                    Seat.NORTH, seed=seed, team_ns="Ref", team_ew=manifest.system_id, ref_clients=ref_clients
+                    Seat.NORTH,
+                    seed=seed,
+                    team_ns="Ref",
+                    team_ew=manifest.system_id,
+                    ref_clients=ref_clients,
+                    opponent_card=card,
                 )
                 closed_seats[Seat.SOUTH] = self._make_ref_bot(
-                    Seat.SOUTH, seed=seed, team_ns="Ref", team_ew=manifest.system_id, ref_clients=ref_clients
+                    Seat.SOUTH,
+                    seed=seed,
+                    team_ns="Ref",
+                    team_ew=manifest.system_id,
+                    ref_clients=ref_clients,
+                    opponent_card=card,
                 )
                 closed_seats[Seat.EAST] = self._make_tenace_bot(
-                    Seat.EAST, card, chal_clients[0], chal_clients[1], seed=seed, salt=17
+                    Seat.EAST,
+                    card,
+                    chal_clients[0],
+                    chal_clients[1],
+                    seed=seed,
+                    salt=17,
+                    opponent_card=challenger_opp_card,
                 )
                 closed_seats[Seat.WEST] = self._make_tenace_bot(
-                    Seat.WEST, card, chal_clients[0], chal_clients[1], seed=seed, salt=17
+                    Seat.WEST,
+                    card,
+                    chal_clients[0],
+                    chal_clients[1],
+                    seed=seed,
+                    salt=17,
+                    opponent_card=challenger_opp_card,
                 )
                 chal_bots = [
                     open_seats[Seat.NORTH],

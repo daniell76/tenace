@@ -358,26 +358,304 @@ def _dealt_hand(world: pyspiel.State, seat: Seat) -> list[int]:
     return [dealt[4 * r + seat_idx].action for r in range(13)]
 
 
-def _constraint_penalty(cards: list[int], constraint: SeatConstraint) -> float:
-    """Return 0.0 if `cards` satisfy hard HCP/suit-length bounds, else soft violation distance."""
-    penalty = 0.0
+def _dealt_hands_map(world: pyspiel.State) -> dict[Seat, list[int]]:
+    dealt = world.full_history()[:NUM_CARDS]
+    return {
+        seat: [dealt[4 * r + int(seat)].action for r in range(13)]
+        for seat in Seat
+    }
+
+
+def _split_constraint_penalty(
+    cards: list[int], constraint: SeatConstraint
+) -> tuple[float, float]:
+    """Return `(hcp_penalty, suit_penalty)` — both `0.0` when `cards` satisfy bounds."""
+    hcp_pen = 0.0
     hcp = hand_hcp(cards)
     if hcp < constraint.min_hcp:
-        penalty += float(constraint.min_hcp - hcp)
+        hcp_pen = float(constraint.min_hcp - hcp)
     elif hcp > constraint.max_hcp:
-        penalty += float(hcp - constraint.max_hcp)
+        hcp_pen = float(hcp - constraint.max_hcp)
 
+    suit_pen = 0.0
     if constraint.min_suit_lengths or constraint.max_suit_lengths:
-        counts: dict[Suit, int] = {s: 0 for s in Suit}
+        counts = [0, 0, 0, 0]
         for c in cards:
-            counts[card_suit(c)] += 1
+            counts[int(card_suit(c))] += 1
         for suit, min_len in constraint.min_suit_lengths.items():
-            if counts[suit] < min_len:
-                penalty += 4.0 * float(min_len - counts[suit])
+            si = int(suit)
+            if counts[si] < min_len:
+                suit_pen += 4.0 * float(min_len - counts[si])
         for suit, max_len in constraint.max_suit_lengths.items():
-            if counts[suit] > max_len:
-                penalty += 4.0 * float(counts[suit] - max_len)
-    return penalty
+            si = int(suit)
+            if counts[si] > max_len:
+                suit_pen += 4.0 * float(counts[si] - max_len)
+    return hcp_pen, suit_pen
+
+
+def _constraint_penalty(cards: list[int], constraint: SeatConstraint) -> float:
+    """Return 0.0 if `cards` satisfy hard HCP/suit-length bounds, else soft violation distance."""
+    hcp_pen, suit_pen = _split_constraint_penalty(cards, constraint)
+    return hcp_pen + suit_pen
+
+
+def _public_voids_from_entries(
+    public_entries: list[Any],
+) -> tuple[dict[Seat, set[Suit]], set[int]]:
+    """Extract publicly revealed voids and played cards from `world.full_history()[52:]`."""
+    voids: dict[Seat, set[Suit]] = {s: set() for s in Seat}
+    last_bid_seat: Seat | None = None
+    last_bid_action: int | None = None
+    first_denom_bidder: dict[tuple[int, int], Seat] = {}
+    play_actions: list[int] = []
+
+    for entry in public_entries:
+        action = entry.action
+        if action >= BIDDING_ACTION_BASE:
+            seat = Seat(entry.player)
+            if FIRST_CONTRACT_BID_ACTION <= action <= MAX_ACTION:
+                denom = (action - FIRST_CONTRACT_BID_ACTION) % 5
+                key = (seat.partnership, denom)
+                if key not in first_denom_bidder:
+                    first_denom_bidder[key] = seat
+                last_bid_seat = seat
+                last_bid_action = action
+        else:
+            play_actions.append(action)
+
+    played_set = set(play_actions)
+    if last_bid_seat is None or last_bid_action is None or not play_actions:
+        return voids, played_set
+
+    trump_denom = (last_bid_action - FIRST_CONTRACT_BID_ACTION) % 5
+    declarer = first_denom_bidder[(last_bid_seat.partnership, trump_denom)]
+    leader = Seat((int(declarer) + 1) % 4)
+
+    for trick_start in range(0, len(play_actions), 4):
+        trick_cards = play_actions[trick_start : trick_start + 4]
+        led_suit = card_suit(trick_cards[0])
+        trick_plays: list[tuple[Seat, int]] = [(leader, trick_cards[0])]
+        for offset, card in enumerate(trick_cards[1:], start=1):
+            seat = Seat((int(leader) + offset) % 4)
+            trick_plays.append((seat, card))
+            if card_suit(card) != led_suit:
+                voids[seat].add(led_suit)
+        if len(trick_cards) == 4:
+            leader = trick_winner(trick_plays, trump_denom)
+
+    return voids, played_set
+
+
+def _seat_stats_energy(
+    hcp: int,
+    suit_counts: list[int],
+    sym_c: SeatConstraint | None,
+    l1_c: SeatConstraint | None,
+    *,
+    l1_hcp_w: float,
+    l1_suit_w: float,
+) -> float:
+    energy = 0.0
+    if sym_c is not None:
+        hp = 0.0
+        if hcp < sym_c.min_hcp:
+            hp = float(sym_c.min_hcp - hcp)
+        elif hcp > sym_c.max_hcp:
+            hp = float(hcp - sym_c.max_hcp)
+        sp = 0.0
+        for suit, min_len in sym_c.min_suit_lengths.items():
+            si = int(suit)
+            if suit_counts[si] < min_len:
+                sp += 4.0 * float(min_len - suit_counts[si])
+        for suit, max_len in sym_c.max_suit_lengths.items():
+            si = int(suit)
+            if suit_counts[si] > max_len:
+                sp += 4.0 * float(suit_counts[si] - max_len)
+        energy += 2.0 * (hp + sp)
+    if l1_c is not None:
+        hp = 0.0
+        if hcp < l1_c.min_hcp:
+            hp = float(l1_c.min_hcp - hcp)
+        elif hcp > l1_c.max_hcp:
+            hp = float(hcp - l1_c.max_hcp)
+        sp = 0.0
+        for suit, min_len in l1_c.min_suit_lengths.items():
+            si = int(suit)
+            if suit_counts[si] < min_len:
+                sp += 4.0 * float(min_len - suit_counts[si])
+        for suit, max_len in l1_c.max_suit_lengths.items():
+            si = int(suit)
+            if suit_counts[si] > max_len:
+                sp += 4.0 * float(suit_counts[si] - max_len)
+        energy += (l1_hcp_w * hp) + (l1_suit_w * sp)
+    return energy
+
+
+def _repair_world_via_swaps(
+    world: pyspiel.State,
+    hidden_seats: list[Seat],
+    sym_map: dict[Seat, SeatConstraint],
+    l1_map: dict[Seat, SeatConstraint],
+    *,
+    l1_hcp_w: float,
+    l1_suit_w: float,
+    rng: random.Random,
+    max_steps: int = 36,
+) -> pyspiel.State:
+    """Repair a resampled near-match world via legal unplayed-card swaps between hidden seats.
+
+    Strictly fair-play: reads ONLY the already-resampled `world` (never the true hidden state)
+    and preserves observer/dummy hands, every played card, and every publicly shown void.
+    """
+    if len(hidden_seats) < 2:
+        return world
+
+    full_hist = world.full_history()
+    if len(full_hist) < NUM_CARDS:
+        return world
+    dealt = [e.action for e in full_hist[:NUM_CARDS]]
+    pub_entries = full_hist[NUM_CARDS:]
+    pub_actions = [e.action for e in pub_entries]
+    public_voids, played_set = _public_voids_from_entries(pub_entries)
+
+    hands: dict[Seat, list[int]] = {
+        s: [dealt[4 * r + int(s)] for r in range(13)] for s in Seat
+    }
+    hcp_by_seat: dict[Seat, int] = {}
+    counts_by_seat: dict[Seat, list[int]] = {}
+    movable: dict[Seat, list[int]] = {}
+    for s in hidden_seats:
+        cards = hands[s]
+        hcp_by_seat[s] = hand_hcp(cards)
+        cnt = [0, 0, 0, 0]
+        mov: list[int] = []
+        for idx, c in enumerate(cards):
+            cnt[int(card_suit(c))] += 1
+            if c not in played_set:
+                mov.append(idx)
+        counts_by_seat[s] = cnt
+        movable[s] = mov
+
+    seat_e: dict[Seat, float] = {
+        s: _seat_stats_energy(
+            hcp_by_seat[s],
+            counts_by_seat[s],
+            sym_map.get(s),
+            l1_map.get(s),
+            l1_hcp_w=l1_hcp_w,
+            l1_suit_w=l1_suit_w,
+        )
+        for s in hidden_seats
+    }
+    orig_total = sum(seat_e.values())
+    cur_total = orig_total
+    if cur_total <= 0.0:
+        return world
+
+    pairs = [
+        (hidden_seats[i], hidden_seats[j])
+        for i in range(len(hidden_seats))
+        for j in range(i + 1, len(hidden_seats))
+    ]
+    for _ in range(max_steps):
+        if cur_total <= 0.0:
+            break
+        improved = False
+        rng.shuffle(pairs)
+        for sa, sb in pairs:
+            ma = movable[sa]
+            mb = movable[sb]
+            if not ma or not mb:
+                continue
+            va = public_voids[sa]
+            vb = public_voids[sb]
+            ha = hands[sa]
+            hb = hands[sb]
+            ca_cnt = counts_by_seat[sa]
+            cb_cnt = counts_by_seat[sb]
+            hcp_a = hcp_by_seat[sa]
+            hcp_b = hcp_by_seat[sb]
+            sym_a, l1_a = sym_map.get(sa), l1_map.get(sa)
+            sym_b, l1_b = sym_map.get(sb), l1_map.get(sb)
+            old_pair_e = seat_e[sa] + seat_e[sb]
+
+            rng.shuffle(ma)
+            rng.shuffle(mb)
+            found_swap = False
+            for ia in ma:
+                ca = ha[ia]
+                suit_a = card_suit(ca)
+                if suit_a in vb:
+                    continue
+                si_a = int(suit_a)
+                pt_a = max(0, card_rank(ca) - 8)
+                for ib in mb:
+                    cb = hb[ib]
+                    suit_b = card_suit(cb)
+                    if suit_b in va:
+                        continue
+                    si_b = int(suit_b)
+                    pt_b = max(0, card_rank(cb) - 8)
+                    if si_a == si_b and pt_a == pt_b:
+                        continue
+                    # O(1) incremental swap trial
+                    ca_cnt[si_a] -= 1
+                    ca_cnt[si_b] += 1
+                    cb_cnt[si_b] -= 1
+                    cb_cnt[si_a] += 1
+                    new_hcp_a = hcp_a - pt_a + pt_b
+                    new_hcp_b = hcp_b - pt_b + pt_a
+                    new_ea = _seat_stats_energy(
+                        new_hcp_a,
+                        ca_cnt,
+                        sym_a,
+                        l1_a,
+                        l1_hcp_w=l1_hcp_w,
+                        l1_suit_w=l1_suit_w,
+                    )
+                    new_eb = _seat_stats_energy(
+                        new_hcp_b,
+                        cb_cnt,
+                        sym_b,
+                        l1_b,
+                        l1_hcp_w=l1_hcp_w,
+                        l1_suit_w=l1_suit_w,
+                    )
+                    if new_ea + new_eb + 1e-9 < old_pair_e:
+                        ha[ia], hb[ib] = cb, ca
+                        hcp_by_seat[sa] = new_hcp_a
+                        hcp_by_seat[sb] = new_hcp_b
+                        seat_e[sa] = new_ea
+                        seat_e[sb] = new_eb
+                        cur_total = cur_total - old_pair_e + new_ea + new_eb
+                        improved = True
+                        found_swap = True
+                        break
+                    # Undo counts
+                    ca_cnt[si_a] += 1
+                    ca_cnt[si_b] -= 1
+                    cb_cnt[si_b] += 1
+                    cb_cnt[si_a] -= 1
+                if found_swap:
+                    break
+            if improved:
+                break
+        if not improved:
+            break
+
+    if cur_total + 1e-9 >= orig_total:
+        return world
+
+    try:
+        repaired = world.get_game().new_initial_state()
+        for r in range(13):
+            for seat_idx in range(4):
+                repaired.apply_action(hands[Seat(seat_idx)][r])
+        for action in pub_actions:
+            repaired.apply_action(action)
+        return repaired
+    except Exception:
+        return world
 
 
 def _matches_constraint(cards: list[int], constraint: SeatConstraint) -> bool:
@@ -389,18 +667,26 @@ def infer_symbolic_auction_constraints(
     state: pyspiel.State,
     observer: Seat,
     system_id: str = "sayc",
+    *,
+    opponent_system_id: str | None = None,
 ) -> dict[Seat, SeatConstraint]:
     """Infer conservative HCP and suit-length bounds strictly from public auction calls.
+
+    Uses `system_id` for `observer`'s partnership and `opponent_system_id` (defaulting to
+    `system_id`) for the opposing partnership so asymmetric system matchups (e.g., CCBA vs.
+    Precision strong 1C or Acol weak 1NT) are modeled accurately.
 
     FAIR-PLAY INVARIANT: Inspects ONLY `state.full_history()[NUM_CARDS:]` (public calls),
     never touching dealt card identities `[:NUM_CARDS]`. Excludes `observer` and any visible dummy.
     """
     observer = Seat(observer)
     visible_dummy = _visible_dummy_seat(state)
-    sys_key = (system_id or "sayc").strip().lower()
-    is_precision = sys_key == "precision"
-    is_polish = sys_key == "polish_club"
-    is_acol = sys_key == "acol"
+    our_sys = (system_id or "sayc").strip().lower()
+    opp_sys = (opponent_system_id or our_sys).strip().lower()
+
+    def _side_flags(partnership: int) -> tuple[bool, bool, bool]:
+        sk = our_sys if partnership == observer.partnership else opp_sys
+        return (sk == "precision", sk == "polish_club", sk == "acol")
 
     public_history = state.full_history()[NUM_CARDS:]
     calls: list[tuple[Seat, int]] = []
@@ -431,6 +717,7 @@ def infer_symbolic_auction_constraints(
 
     for idx, (seat, act) in enumerate(calls):
         side = seat.partnership
+        is_precision, is_polish, is_acol = _side_flags(side)
         if act == PASS_ACTION:
             passes_since_bid += 1
             if pending_double is not None:
@@ -776,6 +1063,7 @@ class RuleDDSEvaluator:
         *,
         target_worlds: int | None = None,
         system_id: str | None = None,
+        opponent_system_id: str | None = None,
     ) -> list[pyspiel.State]:
         """Samples infostate worlds ranked by soft HCP/suit-length constraint fit."""
         observer = Seat(observer)
@@ -786,7 +1074,12 @@ class RuleDDSEvaluator:
         visible_dummy = _visible_dummy_seat(state)
         l1_constraints = strategy.seat_constraints if strategy is not None else None
         symbolic: dict[Seat, SeatConstraint] = (
-            infer_symbolic_auction_constraints(state, observer, system_id=system_id)
+            infer_symbolic_auction_constraints(
+                state,
+                observer,
+                system_id=system_id,
+                opponent_system_id=opponent_system_id,
+            )
             if (state.current_phase() == 2 and system_id is not None)
             else {}
         )
@@ -821,36 +1114,48 @@ class RuleDDSEvaluator:
             max_attempts = desired * self.max_rejection_factor
 
         # Weight verified public-auction symbolic constraints strictly heavier than noisy L1
-        # estimates so an overtight L1 HCP guess (e.g. guessing 19-22 when only 14 remain)
-        # can NEVER override a known suit length (e.g. 1S response = 4+ spades) or collapse
-        # all worlds into a single degenerate corner!
-        l1_weight = 0.35 if symbolic_items else 1.0
+        # HCP estimates (`0.35`) so an overtight L1 HCP guess (e.g. 19-22 when only 14 remain)
+        # can NEVER override a known suit length (e.g. 1S response = 4+ spades), while explicit
+        # L1 suit-length deductions (`max_suit_lengths` / `min_suit_lengths`, e.g. partner's
+        # singleton ruff switch) carry strong `1.25` weight so violating worlds never slip past
+        # Gumbel diversification!
+        l1_hcp_w = 0.35 if symbolic_items else 1.0
+        l1_suit_w = 1.25 if symbolic_items else 1.0
         exact: list[pyspiel.State] = []
         near_matches: list[tuple[float, int, pyspiel.State]] = []
 
         for draw_idx in range(max_attempts):
             world = state.resample_from_infostate(int(observer), self._rng.random)
-            sym_pen = sum(
-                _constraint_penalty(_dealt_hand(world, seat), constraint)
-                for seat, constraint in symbolic_items
-            )
-            l1_pen = sum(
-                _constraint_penalty(_dealt_hand(world, seat), constraint)
-                for seat, constraint in l1_items
-            )
-            if sym_pen == 0.0 and l1_pen == 0.0:
+            hands_map = _dealt_hands_map(world)
+            sym_pen = 0.0
+            for seat, constraint in symbolic_items:
+                hp, sp = _split_constraint_penalty(hands_map[seat], constraint)
+                sym_pen += hp + sp
+            l1_hcp_pen = 0.0
+            l1_suit_pen = 0.0
+            for seat, constraint in l1_items:
+                hp, sp = _split_constraint_penalty(hands_map[seat], constraint)
+                l1_hcp_pen += hp
+                l1_suit_pen += sp
+            if sym_pen == 0.0 and l1_hcp_pen == 0.0 and l1_suit_pen == 0.0:
                 exact.append(world)
                 if len(exact) >= desired:
                     return exact
             else:
                 # Combined Bayesian soft energy + mild random tie-break/temperature to preserve
                 # realistic world diversity across near-feasible deals instead of mode collapse.
-                energy = (2.0 * sym_pen) + (l1_weight * l1_pen)
+                energy = (
+                    (2.0 * sym_pen)
+                    + (l1_hcp_w * l1_hcp_pen)
+                    + (l1_suit_w * l1_suit_pen)
+                )
                 near_matches.append((energy, draw_idx, world))
 
         # Boltzmann-style soft ordering: add bounded Gumbel noise only when ranking near-matches
         # so exact/strong symbolic worlds still dominate without pinning 16/16 identical hands.
         temp = 0.6 if symbolic_items else 0.0
+        fallback_worlds: list[pyspiel.State] = []
+        needed = desired - len(exact)
         if temp > 0.0 and near_matches:
             def _soft_key(item: tuple[float, int, pyspiel.State]) -> float:
                 u = max(1e-9, min(1.0 - 1e-9, self._rng.random()))
@@ -859,12 +1164,34 @@ class RuleDDSEvaluator:
 
             scored_near = [(_soft_key(it), it[1], it[2]) for it in near_matches]
             scored_near.sort(key=lambda item: (item[0], item[1]))
-            needed = desired - len(exact)
-            exact.extend(world for _k, _idx, world in scored_near[:needed])
+            fallback_worlds = [world for _k, _idx, world in scored_near[:needed]]
         else:
             near_matches.sort(key=lambda item: (item[0], item[1]))
-            needed = desired - len(exact)
-            exact.extend(world for _p, _idx, world in near_matches[:needed])
+            fallback_worlds = [world for _p, _idx, world in near_matches[:needed]]
+
+        # On rare tight play-phase deals (e.g. 7-card preempt + 6-card suit + partner singleton
+        # switch where uniform rejection acceptance is < 0.2%), repair fallback worlds via fast
+        # O(1)-delta legal unplayed-card swaps between hidden seats.
+        if is_play and fallback_worlds:
+            hidden_seats = [
+                s for s in Seat if s != observer and s != visible_dummy
+            ]
+            sym_map = dict(symbolic_items)
+            l1_map = dict(l1_items)
+            fallback_worlds = [
+                _repair_world_via_swaps(
+                    w,
+                    hidden_seats,
+                    sym_map,
+                    l1_map,
+                    l1_hcp_w=l1_hcp_w,
+                    l1_suit_w=l1_suit_w,
+                    rng=self._rng,
+                )
+                for w in fallback_worlds
+            ]
+
+        exact.extend(fallback_worlds)
         while len(exact) < desired:
             exact.append(
                 state.resample_from_infostate(int(observer), self._rng.random)
@@ -909,6 +1236,7 @@ class RuleDDSEvaluator:
         strategy: StrategyState | None = None,
         *,
         system_id: str | None = None,
+        opponent_system_id: str | None = None,
         target_worlds: int | None = None,
     ) -> list[CandidateOption]:
         observer = Seat(observer)
@@ -933,7 +1261,12 @@ class RuleDDSEvaluator:
             if 0 < play_count < 16:
                 effective_worlds = min(self.num_worlds + 8, 24)
 
-        if target_worlds is None and system_id is None and effective_worlds is None:
+        if (
+            target_worlds is None
+            and system_id is None
+            and opponent_system_id is None
+            and effective_worlds is None
+        ):
             worlds = self.sample_consistent_worlds(state, observer, strategy)
         else:
             worlds = self.sample_consistent_worlds(
@@ -942,6 +1275,7 @@ class RuleDDSEvaluator:
                 strategy,
                 target_worlds=effective_worlds,
                 system_id=system_id,
+                opponent_system_id=opponent_system_id,
             )
         world_seeds = [self._rng.getrandbits(64) for _ in worlds]
         obs_idx = int(observer)

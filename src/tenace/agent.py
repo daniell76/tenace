@@ -134,6 +134,54 @@ def _partner_winning_trick_card(facts: Any, acting_seat: Seat) -> int | None:
     return None
 
 
+def _partner_early_suit_switch_trigger(facts: Any, acting_seat: Seat) -> str | None:
+    """Detect when we are defending ON LEAD at Trick 3 or 4 immediately after partner
+    won the previous trick and switched to a brand-new non-trump side suit (e.g. singleton ruff).
+    """
+    if (
+        facts.phase != "play"
+        or facts.declarer is None
+        or facts.trump_denom is None
+        or facts.trump_denom >= 4
+        or acting_seat.partnership == facts.declarer.partnership
+    ):
+        return None
+    played = facts.played_cards
+    if len(played) not in (8, 12):
+        return None
+    num_full = len(played) // 4
+    trump_suit = Suit(facts.trump_denom)
+    leader = Seat((int(facts.declarer) + 1) % 4)
+    trick_info: list[tuple[Seat, int, Seat]] = []
+    for t_idx in range(num_full):
+        chunk = played[t_idx * 4 : (t_idx + 1) * 4]
+        plays = [(Seat((int(leader) + o) % 4), c) for o, c in enumerate(chunk)]
+        winner = trick_winner(plays, facts.trump_denom)
+        trick_info.append((leader, chunk[0], winner))
+        leader = winner
+
+    prev_ldr, prev_led, prev_win = trick_info[-2]
+    curr_ldr, curr_led, curr_win = trick_info[-1]
+    partner = acting_seat.partner
+    prev_suit = card_suit(prev_led)
+    curr_suit = card_suit(curr_led)
+    if (
+        prev_win == partner
+        and curr_ldr == partner
+        and curr_win == acting_seat
+        and curr_suit != prev_suit
+        and curr_suit != trump_suit
+    ):
+        from tenace.domain.types import action_label
+
+        return (
+            f"Partner {partner.name} switched to a new side suit "
+            f"{curr_suit.name} ({action_label(curr_led)}) on Trick {num_full} "
+            f"and {acting_seat.name} won the lead — evaluate for singleton ruff shift"
+        )
+    return None
+
+
 class TenaceAgent:
     """3-Layer Neuro-Symbolic Contract Bridge Agent for a single seat."""
 
@@ -144,17 +192,21 @@ class TenaceAgent:
         evaluator_client: StructuredModelClient,
         dds_evaluator: RuleDDSEvaluator | None = None,
         convention_card: ConventionCard = SAYC_CONVENTION_CARD,
+        opponent_convention_card: ConventionCard | None = None,
         max_play_replans: int = 3,
     ) -> None:
         self.seat = Seat(seat)
         self.tracker = RuleFactTracker()
+        self.opponent_convention_card = opponent_convention_card
         self.strategist = StrategistEngine(
             client=strategist_client,
             convention_card=convention_card,
+            opponent_convention_card=opponent_convention_card,
         )
         self.evaluator = TacticalOptionEvaluator(
             client=evaluator_client,
             convention_card=convention_card,
+            opponent_convention_card=opponent_convention_card,
         )
         self.dds_evaluator = (
             dds_evaluator if dds_evaluator is not None else RuleDDSEvaluator()
@@ -206,9 +258,17 @@ class TenaceAgent:
             prev_voids=self._prev_voids,
         )
 
+        is_defending_signal_spot = (
+            facts.phase == "play"
+            and facts.declarer is not None
+            and self.seat.partnership != facts.declarer.partnership
+            and len(facts.played_cards) < 24
+            and (len(facts.played_cards) % 4) != 0
+        )
         candidates = collapse_equivalent_actions(
             state.legal_actions(),
             played_cards=set(facts.played_cards),
+            preserve_signals=is_defending_signal_spot,
         )
         if not candidates:
             raise ValueError("No legal actions available on non-terminal state")
@@ -272,9 +332,10 @@ class TenaceAgent:
                 and not self._dummy_seen
             )
         )
+        partner_switch_trigger = _partner_early_suit_switch_trigger(facts, self.seat)
         strategy_updated_this_turn = False
         has_budget = facts.phase != "play" or self._play_strategist_calls < self.max_play_replans
-        if needs_mandatory_plan or (meaningful_surprises and has_budget):
+        if needs_mandatory_plan or ((meaningful_surprises or partner_switch_trigger) and has_budget):
             trigger_reasons: list[str] = []
             if self.strategy is None:
                 trigger_reasons.append("Initial board planning")
@@ -290,6 +351,8 @@ class TenaceAgent:
                 and not self._dummy_seen
             ):
                 trigger_reasons.append("Dummy revealed after opening lead")
+            if partner_switch_trigger:
+                trigger_reasons.append(partner_switch_trigger)
             if meaningful_surprises:
                 trigger_reasons.append("; ".join(meaningful_surprises))
             elif facts.surprise_events:
@@ -310,14 +373,20 @@ class TenaceAgent:
 
         assert self.strategy is not None
 
-        # Layer 3 Constrained DDS Scoring
+        # Layer 3 Constrained DDS Scoring (per-partnership system disclosure!)
         card_system_id = self.strategist.convention_card.id
+        opp_system_id = (
+            self.opponent_convention_card.id
+            if self.opponent_convention_card is not None
+            else None
+        )
         scored_candidates = self.dds_evaluator.score_candidates(
             state,
             self.seat,
             candidates,
             strategy=self.strategy,
             system_id=card_system_id,
+            opponent_system_id=opp_system_id,
         )
 
         # Post-dummy 0-LLM DDS fast path: once dummy is seen and Trick 2 has completed,
@@ -372,6 +441,7 @@ class TenaceAgent:
                 candidates,
                 strategy=self.strategy,
                 system_id=card_system_id,
+                opponent_system_id=opp_system_id,
             )
             decision = self.evaluator.evaluate(
                 facts,

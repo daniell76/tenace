@@ -248,6 +248,8 @@ class StepRequest(BaseModel):
     profile: ModelProfile | None = None
     bidding_system: StrictStr | None = None
     convention_card: ConventionCard | None = None
+    opponent_bidding_system: StrictStr | None = None
+    opponent_convention_card: ConventionCard | None = None
     dds_worlds: int | None = Field(default=None, ge=1, le=256)
     seed: int = Field(default=42, ge=0, le=_MAX_INT32)
     bot: Literal["tenace", "baseline"] = "tenace"
@@ -283,6 +285,18 @@ class StepRequest(BaseModel):
             )
         if self.bidding_system is not None:
             self.bidding_system = validate_skill_slug(self.bidding_system)
+        if (
+            self.opponent_bidding_system is not None
+            and self.opponent_convention_card is not None
+        ):
+            raise ValueError(
+                "Provide at most one of 'opponent_bidding_system' or "
+                "'opponent_convention_card', not both"
+            )
+        if self.opponent_bidding_system is not None:
+            self.opponent_bidding_system = validate_skill_slug(
+                self.opponent_bidding_system
+            )
 
         for tok in self.action_history:
             parse_action_token(tok)
@@ -1364,6 +1378,16 @@ def create_app(
                 is_caller_override=False,
             ).to_convention_card()
 
+        if req.opponent_convention_card is not None:
+            opponent_card: ConventionCard | None = req.opponent_convention_card
+        elif req.opponent_bidding_system is not None:
+            opponent_card = resolve_skill_or_http_error(
+                req.opponent_bidding_system,
+                is_caller_override=True,
+            ).to_convention_card()
+        else:
+            opponent_card = None
+
         agent = TenaceAgent(
             seat=observer,
             strategist_client=strategist_client,
@@ -1373,6 +1397,7 @@ def create_app(
                 rng_seed=req.seed,
             ),
             convention_card=active_card,
+            opponent_convention_card=opponent_card,
         )
         if req.prior_strategy is not None:
             agent.strategy = req.prior_strategy
@@ -1424,18 +1449,7 @@ def create_app(
         card_a = skill_a.to_convention_card()
         team_a_system_label = f"{skill_a.meta.name} [{skill_a.meta.id}]"
         team_b_system_label: str | None = None
-
-        def team_a_factory(seat: Seat) -> BridgeSeatBot:
-            return TenaceAgent(
-                seat=seat,
-                strategist_client=strategist_a,
-                evaluator_client=evaluator_a,
-                dds_evaluator=RuleDDSEvaluator(
-                    num_worlds=active_dds_worlds,
-                    rng_seed=(req.seed * 31) + int(seat),
-                ),
-                convention_card=card_a,
-            )
+        opponent_card_for_a: ConventionCard | None = None
 
         if req.opponent == "tenace":
             profile_b = (
@@ -1450,6 +1464,7 @@ def create_app(
                 else skill_a
             )
             card_b = skill_b.to_convention_card()
+            opponent_card_for_a = card_b
             team_b_system_label = f"{skill_b.meta.name} [{skill_b.meta.id}]"
             team_a_name = "Tenace-A"
             team_b_name = "Tenace-B"
@@ -1469,12 +1484,26 @@ def create_app(
                         rng_seed=(req.seed * 37) + int(seat) + 100,
                     ),
                     convention_card=card_b,
+                    opponent_convention_card=card_a,
                 )
         else:
             team_a_name = "Tenace"
             team_b_name = "Baseline"
             team_b_profile_label = None
             team_b_factory = FirstLegalPassBaselineBot
+
+        def team_a_factory(seat: Seat) -> BridgeSeatBot:
+            return TenaceAgent(
+                seat=seat,
+                strategist_client=strategist_a,
+                evaluator_client=evaluator_a,
+                dds_evaluator=RuleDDSEvaluator(
+                    num_worlds=active_dds_worlds,
+                    rng_seed=(req.seed * 31) + int(seat),
+                ),
+                convention_card=card_a,
+                opponent_convention_card=opponent_card_for_a,
+            )
 
         runner = DuplicateMatchRunner(
             tournament_seed=req.seed,

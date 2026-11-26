@@ -607,7 +607,10 @@ def build_arg_parser(env: Mapping[str, str] | None = None) -> argparse.ArgumentP
     parser.add_argument(
         "--opponent-system",
         default=None,
-        help="Override bidding system skill ID or SKILL.md path for Team B (--opponent tenace).",
+        help=(
+            "Bidding system skill ID or SKILL.md path for Team B (--opponent tenace) "
+            "or disclosed opponent convention card (--opponent bluechip)."
+        ),
     )
     parser.add_argument(
         "--list-systems",
@@ -626,6 +629,7 @@ def resolve_model_profiles(
             cli_flag
             for attr_name, cli_flag in _OPPONENT_TENACE_FLAGS
             if getattr(args, attr_name, None) is not None
+            and not (args.opponent == "bluechip" and attr_name == "opponent_system")
         ]
         if provided_opponent_flags:
             flags_str = ", ".join(provided_opponent_flags)
@@ -961,21 +965,10 @@ def run_cli(argv: list[str] | None = None) -> int:
     team_a_system_label = f"{team_a_skill.meta.name} [{team_a_skill.meta.id}]"
     strategist_client, evaluator_client = build_clients_for_profile(team_a_profile)
 
-    def team_a_factory(seat: Seat) -> BridgeSeatBot:
-        return TenaceAgent(
-            seat=seat,
-            strategist_client=strategist_client,
-            evaluator_client=evaluator_client,
-            dds_evaluator=RuleDDSEvaluator(
-                num_worlds=args.dds_worlds,
-                rng_seed=(args.seed * 31) + int(seat),
-            ),
-            convention_card=team_a_card,
-        )
-
     team_a_name = "Tenace"
     team_b_profile_label: str | None = None
     team_b_system_label: str | None = None
+    opponent_card_for_a = None
 
     if args.opponent == "tenace":
         assert team_b_profile is not None
@@ -988,6 +981,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             else team_a_skill
         )
         team_b_card = team_b_skill.to_convention_card()
+        opponent_card_for_a = team_b_card
         team_b_system_label = f"{team_b_skill.meta.name} [{team_b_skill.meta.id}]"
         opp_strategist_client, opp_evaluator_client = build_clients_for_profile(team_b_profile)
 
@@ -1001,11 +995,16 @@ def run_cli(argv: list[str] | None = None) -> int:
                     rng_seed=(args.seed * 37) + int(seat) + 100,
                 ),
                 convention_card=team_b_card,
+                opponent_convention_card=team_a_card,
             )
     elif args.opponent == "bluechip":
         team_b_name = "BlueChip"
         cmd_template = args.bluechip_cmd
         timeout_secs = args.bluechip_timeout
+        if args.opponent_system is not None:
+            opp_skill = registry.load(args.opponent_system, allow_file_path=True)
+            opponent_card_for_a = opp_skill.to_convention_card()
+            team_b_system_label = f"{opp_skill.meta.name} [{opp_skill.meta.id}]"
 
         def team_b_factory(seat: Seat) -> BridgeSeatBot:
             is_ns = seat in (Seat.NORTH, Seat.SOUTH)
@@ -1022,6 +1021,19 @@ def run_cli(argv: list[str] | None = None) -> int:
     else:
         team_b_name = "Baseline"
         team_b_factory = FirstLegalPassBaselineBot
+
+    def team_a_factory(seat: Seat) -> BridgeSeatBot:
+        return TenaceAgent(
+            seat=seat,
+            strategist_client=strategist_client,
+            evaluator_client=evaluator_client,
+            dds_evaluator=RuleDDSEvaluator(
+                num_worlds=args.dds_worlds,
+                rng_seed=(args.seed * 31) + int(seat),
+            ),
+            convention_card=team_a_card,
+            opponent_convention_card=opponent_card_for_a,
+        )
 
     runner = DuplicateMatchRunner(
         tournament_seed=args.seed,
