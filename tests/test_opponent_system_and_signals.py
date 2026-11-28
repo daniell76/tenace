@@ -439,3 +439,55 @@ def test_cli_allows_opponent_system_with_bluechip_for_disclosure() -> None:
     assert profile_a.mode == "mock"
     assert profile_b is None
     assert args.opponent_system == "21gf"
+
+
+def test_carding_notes_does_not_claim_singleton_ruff_in_declarer_bid_suit() -> None:
+    # Seed 4300 Bd 3: W:1H - E:1S - W:2D - E:4H.
+    # T1: N:C:6 E:C:Q S:C:K W:C:4 -> S; T2: S:S:4 W:S:J N:S:K E:S:2 -> N.
+    # Spades was bid by declarer's side (East 1S!), so South's S:4 switch must NOT be
+    # mislabeled as a singleton ruff shift!
+    st = _state_after_calls(
+        4300,
+        3,
+        ["Pass", "1H", "Pass", "1S", "Pass", "2D", "Pass", "4H", "Pass", "Pass", "Pass"],
+    )
+    for card in ("C:6", "C:Q", "C:K", "C:4", "S:4", "S:J", "S:K", "S:2"):
+        st.apply_action(LABEL_TO_ID[card])
+
+    facts = RuleFactTracker().extract_facts(st, Seat.NORTH)
+    notes = extract_defensive_carding_notes(facts)
+    joined = " ".join(notes).lower()
+    assert "singleton" not in joined
+    assert "ruff" not in joined
+
+
+def test_partner_high_encouraging_signal_triggers_replan_and_notes() -> None:
+    # Seed 4300 Bd 4: E:1D - W:1H - E:2NT - W:3NT.
+    # At Trick 6, SOUTH cashes C:A and partner NORTH plays high encouraging C:J (from KJT94!).
+    st = _state_after_calls(
+        4300,
+        4,
+        ["Pass", "Pass", "1D", "Pass", "1H", "Pass", "2NT", "Pass", "3NT", "Pass", "Pass", "Pass"],
+    )
+    for card in (
+        "S:9", "S:T", "S:Q", "S:K",
+        "H:K", "H:4", "H:3", "H:2",
+        "H:A", "H:5", "H:6", "H:8",
+        "S:2", "S:8", "S:A", "S:6",
+        "D:7", "D:9", "D:Q", "D:K",
+        "C:A", "C:8", "C:J", "C:7",
+    ):
+        st.apply_action(LABEL_TO_ID[card])
+
+    facts = RuleFactTracker().extract_facts(st, Seat.SOUTH)
+    notes = extract_defensive_carding_notes(facts)
+    joined = " ".join(notes).lower()
+    assert "c:j" in joined
+    assert "encourag" in joined
+
+    from tenace.agent import _partner_high_signal_trigger
+
+    trig = _partner_high_signal_trigger(facts, Seat.SOUTH)
+    assert trig is not None
+    assert "C:J" in trig
+    assert "CLUBS" in trig

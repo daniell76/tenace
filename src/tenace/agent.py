@@ -172,13 +172,71 @@ def _partner_early_suit_switch_trigger(facts: Any, acting_seat: Seat) -> str | N
         and curr_suit != prev_suit
         and curr_suit != trump_suit
     ):
-        from tenace.domain.types import action_label
+        from tenace.domain.types import FIRST_CONTRACT_BID_ACTION, action_label
+
+        declarer_bid_suits = {
+            Suit((call_action - FIRST_CONTRACT_BID_ACTION) % 5)
+            for call_seat, call_action in facts.auction_calls
+            if call_seat.partnership == facts.declarer.partnership
+            and FIRST_CONTRACT_BID_ACTION <= call_action <= 89
+            and (call_action - FIRST_CONTRACT_BID_ACTION) % 5 < 4
+        }
+        visible_pool = set(facts.own_cards) | set(facts.dummy_cards) | set(played)
+        vis_in_suit = sum(1 for c in visible_pool if card_suit(c) == curr_suit)
+        if curr_suit in declarer_bid_suits or vis_in_suit < 8:
+            return None
 
         return (
             f"Partner {partner.name} switched to a new side suit "
             f"{curr_suit.name} ({action_label(curr_led)}) on Trick {num_full} "
             f"and {acting_seat.name} won the lead — evaluate for singleton ruff shift"
         )
+    return None
+
+
+def _partner_high_signal_trigger(facts: Any, acting_seat: Seat) -> str | None:
+    """Detect when partner plays a high encouraging honor/spot (9/T/J/Q) on our won trick."""
+    if (
+        facts.phase != "play"
+        or facts.declarer is None
+        or acting_seat.partnership == facts.declarer.partnership
+    ):
+        return None
+    played = facts.played_cards
+    if len(played) < 4 or len(played) > 36 or len(played) % 4 != 0:
+        return None
+
+    from tenace.domain.types import action_label, card_rank
+
+    num_full = len(played) // 4
+    leader = Seat((int(facts.declarer) + 1) % 4)
+    last_plays: list[tuple[Seat, int]] = []
+    last_leader = leader
+    last_winner = leader
+    for t_idx in range(num_full):
+        chunk = played[t_idx * 4 : (t_idx + 1) * 4]
+        plays = [(Seat((int(leader) + o) % 4), c) for o, c in enumerate(chunk)]
+        winner = trick_winner(plays, facts.trump_denom)
+        last_plays, last_leader, last_winner = plays, leader, winner
+        leader = winner
+
+    if last_leader != acting_seat or last_winner != acting_seat:
+        return None
+    led_suit = card_suit(last_plays[0][1])
+    if not any(card_suit(c) == led_suit for c in facts.own_cards):
+        return None
+    partner = acting_seat.partner
+    for seat_p, card_p in last_plays:
+        if (
+            seat_p == partner
+            and card_suit(card_p) == led_suit
+            and 7 <= card_rank(card_p) <= 10
+        ):
+            return (
+                f"Partner {partner.name} played high encouraging {action_label(card_p)} "
+                f"on your {led_suit.name} winner at Trick {num_full} — "
+                f"re-evaluate continuing {led_suit.name}"
+            )
     return None
 
 
@@ -333,9 +391,13 @@ class TenaceAgent:
             )
         )
         partner_switch_trigger = _partner_early_suit_switch_trigger(facts, self.seat)
+        partner_signal_trigger = _partner_high_signal_trigger(facts, self.seat)
         strategy_updated_this_turn = False
         has_budget = facts.phase != "play" or self._play_strategist_calls < self.max_play_replans
-        if needs_mandatory_plan or ((meaningful_surprises or partner_switch_trigger) and has_budget):
+        if needs_mandatory_plan or (
+            (meaningful_surprises or partner_switch_trigger or partner_signal_trigger)
+            and has_budget
+        ):
             trigger_reasons: list[str] = []
             if self.strategy is None:
                 trigger_reasons.append("Initial board planning")
@@ -353,6 +415,8 @@ class TenaceAgent:
                 trigger_reasons.append("Dummy revealed after opening lead")
             if partner_switch_trigger:
                 trigger_reasons.append(partner_switch_trigger)
+            if partner_signal_trigger:
+                trigger_reasons.append(partner_signal_trigger)
             if meaningful_surprises:
                 trigger_reasons.append("; ".join(meaningful_surprises))
             elif facts.surprise_events:

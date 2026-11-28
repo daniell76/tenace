@@ -1408,7 +1408,7 @@ class RuleDDSEvaluator:
         *,
         phase: Literal["play", "auction"] = "play",
         preferred_action: int | None = None,
-        auction_tie_margin: float = 0.08,
+        auction_tie_margin: float = 0.15,
         play_preferred_ev_margin: float | None = None,
         play_preferred_mp_margin: float | None = None,
         play_ev_weight: float = 0.45,

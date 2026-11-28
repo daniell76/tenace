@@ -99,6 +99,9 @@ def build_strategist_system_prompt(
         "ragged 5-card suit missing the 9 (e.g., JT863), lead 4th-best low rather than the Jack.\n"
         "- Lead partner's bid/overcalled suit in competitive auctions unless holding a solid AK(x) "
         "or clear singleton ruff.\n"
+        "- Against a suit contract where dummy opened or rebid `1NT` (strong balanced hand), "
+        "avoid leading a singleton trump directly into dummy's high trump honors; prefer attacking "
+        "an unbid suit or leading safely from a side holding.\n"
         "- After winning Tricks 1-2 on defense (e.g., AK), check for a singleton shift to score a "
         "trump ruff whenever you still hold trump control or partner has an outside entry. "
         "Conversely, if partner wins Trick 1 against a suit contract and IMMEDIATELY switches to a "
@@ -303,10 +306,23 @@ def extract_defensive_carding_notes(facts: BoardFactSnapshot) -> list[str]:
         leader = winner
 
     notes: list[str] = []
+    # Collect suits naturally bid by declarer's side to avoid misreading a switch into
+    # declarer/dummy's bid suit as a singleton ruff shift.
+    declarer_bid_suits: set[Suit] = set()
+    for call_seat, call_action in facts.auction_calls:
+        if (
+            call_seat.partnership == facts.declarer.partnership
+            and FIRST_CONTRACT_BID_ACTION <= call_action <= 89
+        ):
+            denom = (call_action - FIRST_CONTRACT_BID_ACTION) % 5
+            if denom < 4:
+                declarer_bid_suits.add(Suit(denom))
+
     # 1. Detect early partner suit-switch (Trick 2 or 3) against a suit contract:
     #    partner won Trick k in suit S1 and immediately led a new non-trump side suit S2!
     if is_defender and facts.trump_denom is not None and facts.trump_denom < 4:
         trump_suit = Suit(facts.trump_denom)
+        visible_pool = list(facts.own_cards) + list(facts.dummy_cards) + list(played)
         for i in range(1, min(len(trick_records), 3)):
             prev_no, _prev_ldr, prev_led_card, _prev_plays, prev_win = trick_records[i - 1]
             curr_no, curr_ldr, curr_led_card, _curr_plays, _curr_win = trick_records[i]
@@ -318,12 +334,45 @@ def extract_defensive_carding_notes(facts: BoardFactSnapshot) -> list[str]:
                 and curr_suit != prev_suit
                 and curr_suit != trump_suit
             ):
-                low_tag = "low " if card_rank(curr_led_card) <= 6 else ""
-                notes.append(
-                    f"Partner {partner.name} won Trick {prev_no} ({prev_suit.name}) and "
-                    f"switched to {low_tag}{curr_suit.name} ({action_label(curr_led_card)}) "
-                    f"at Trick {curr_no} — potential singleton/short-suit ruff shift."
+                vis_in_suit = sum(
+                    1 for c in set(visible_pool) if card_suit(c) == curr_suit
                 )
+                likely_ruff = (
+                    curr_suit not in declarer_bid_suits and vis_in_suit >= 8
+                )
+                low_tag = "low " if card_rank(curr_led_card) <= 6 else ""
+                if likely_ruff:
+                    notes.append(
+                        f"Partner {partner.name} won Trick {prev_no} ({prev_suit.name}) and "
+                        f"switched to {low_tag}{curr_suit.name} ({action_label(curr_led_card)}) "
+                        f"at Trick {curr_no} — potential singleton/short-suit ruff shift."
+                    )
+                else:
+                    notes.append(
+                        f"Partner {partner.name} won Trick {prev_no} ({prev_suit.name}) and "
+                        f"switched to {curr_suit.name} ({action_label(curr_led_card)}) at Trick {curr_no}."
+                    )
+
+    # 1b. Detect partner's high encouraging signal (9/T/J/Q) on our own won trick!
+    if is_defender:
+        own_suit_remaining = {card_suit(c) for c in facts.own_cards}
+        for t_no, t_ldr, t_led, t_plays, t_win in reversed(trick_records):
+            if t_ldr == facts.observer and t_win == facts.observer:
+                led_suit = card_suit(t_led)
+                if led_suit not in own_suit_remaining:
+                    continue
+                for s_p, c_p in t_plays:
+                    if (
+                        s_p == partner
+                        and card_suit(c_p) == led_suit
+                        and 7 <= card_rank(c_p) <= 10  # 9, T, J, Q encouraging signal
+                    ):
+                        notes.append(
+                            f"Partner {partner.name} played high encouraging {action_label(c_p)} "
+                            f"on your {led_suit.name} winner at Trick {t_no} — consider continuing {led_suit.name}."
+                        )
+                        break
+                break
 
     # 2. Detect standard high-low (even count) vs low-high (odd count) spot echoes
     #    (prioritize partner's signals when defending, plus opponents' count signals).
